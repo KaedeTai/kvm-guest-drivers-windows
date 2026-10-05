@@ -1234,6 +1234,24 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
             allocationInfo->PreferredSegment.SegmentId0 = 1;
             allocationInfo->PreferredSegment.Direction0 = 0;
             allocationInfo->Flags.CpuVisible = TRUE;
+            // Coherent 3D resources (the win32k staging and shadow surfaces
+            // behind redirected blt-model presents, see
+            // GetStandardAllocationDriverData) are read and written by the
+            // CPU: dxgkrnl copies the staging surface into the window's
+            // redirection bitmap with GDI on the presenting thread after
+            // TRANSFER_FROM_HOST fills it, and GDI renders into the shadow
+            // surface.  VidMm backs a CpuVisible allocation with
+            // write-combined system memory unless Cached is set, and
+            // write-combined reads are uncached bus transactions that
+            // dominate that copy.  Write-back backing is what an allocation
+            // the CPU reads calls for, it matches the host's write-back
+            // mapping of the same pages, and segment 1 is a cache-coherent
+            // aperture, so VidMm adds no flushes.  Primaries are never
+            // MAP_COHERENT, so this cannot set Cached on one.
+            if (resourceExchange->Options3D.flags & VIRGL_RESOURCE_FLAG_MAP_COHERENT)
+            {
+                allocationInfo->Flags.Cached = TRUE;
+            }
             allocationInfo->SupportedReadSegmentSet = 0b1;
             allocationInfo->SupportedWriteSegmentSet = 0b1;
             break;
@@ -1306,6 +1324,15 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
             allocationInfo->PreferredSegment.SegmentId0 = 1;
             allocationInfo->PreferredSegment.Direction0 = 0;
             allocationInfo->Flags.CpuVisible = TRUE;
+            // Non-primary shared surfaces are the composited window surfaces
+            // that dxgkrnl's GDI present copy writes into, so they take
+            // write-back backing for the same reason as the coherent 3D case
+            // above.  Cached is not permitted on a primary surface, so
+            // scanout primaries keep the write-combined default.
+            if (!resourceExchange->OptionsShared.primary)
+            {
+                allocationInfo->Flags.Cached = TRUE;
+            }
             allocationInfo->SupportedReadSegmentSet = 0b1;
             allocationInfo->SupportedWriteSegmentSet = 0b1;
             if (resourceExchange->OptionsShared.primary)
