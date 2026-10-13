@@ -18,6 +18,7 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
     m_NodeOrdinal = 0;
     m_EngineOrdinal = 0;
     m_NullRendering = FALSE;
+    m_KmdAuthored = FALSE;
     m_pendingCallbacks = 0;
     m_notified = 0;
     m_pDmaBuffer = NULL;
@@ -421,6 +422,13 @@ void VioGpuCommand::Run()
                     // real host-GPU completion (KMD-authored body, see
                     // VioGpuDevice::Present).  Never touches virtio; same
                     // requeue contract as GATE.
+                    if (!m_KmdAuthored)
+                    {
+                        DbgPrint(TRACE_LEVEL_ERROR,
+                                 ("%s fence_id=%d PRESENT_WAIT in a UMD-authored body; ignored\n",
+                                  __FUNCTION__, m_FenceId));
+                        break;
+                    }
                     if (cmdHdr->size < sizeof(ULONGLONG))
                     {
                         DbgPrint(TRACE_LEVEL_ERROR,
@@ -438,6 +446,13 @@ void VioGpuCommand::Run()
             case VIOGPU_CMD_TRANSFER_TO_HOST:
             case VIOGPU_CMD_TRANSFER_FROM_HOST:
                 {
+                    if (cmdHdr->size < sizeof(VIOGPU_TRANSFER_CMD))
+                    {
+                        DbgPrint(TRACE_LEVEL_ERROR,
+                                 ("%s fence_id=%d TRANSFER with short body (%u)\n",
+                                  __FUNCTION__, m_FenceId, cmdHdr->size));
+                        goto end;
+                    }
                     VIOGPU_TRANSFER_CMD *transferCmd = (VIOGPU_TRANSFER_CMD *)cmdBody;
 
                     AddPending();
@@ -519,7 +534,7 @@ void VioGpuCommand::Run()
             case VIOGPU_CMD_MAP_BLOB:
             case VIOGPU_CMD_UNMAP_BLOB:
                 {
-                    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s fence_id=%d running map/unmap blob, next=%d, curr=%p, end=%p\n", __FUNCTION__, m_FenceId, ((VIOGPU_COMMAND_HDR *)m_pCommand)->type, m_pCommand, m_pEnd));
+                    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s fence_id=%d running map/unmap blob, curr=%p, end=%p\n", __FUNCTION__, m_FenceId, m_pCommand, m_pEnd));
 
                     const BOOLEAN isMap = (cmdHdr->type == VIOGPU_CMD_MAP_BLOB);
                     ULONG *map_idx = (ULONG *)cmdBody;

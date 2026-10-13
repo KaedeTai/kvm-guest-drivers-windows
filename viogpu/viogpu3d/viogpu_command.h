@@ -113,6 +113,13 @@ class VioGpuCommand final : public HandleBase<"VIOGCOMM"_M, VioGpuCommand>
         m_pDmaBuffer = pDmaBuffer;
     }
 
+    // Only a body the KMD built itself may carry VIOGPU_CMD_PRESENT_WAIT; every
+    // other body is UMD-authored.
+    void SetKmdAuthored()
+    {
+        m_KmdAuthored = TRUE;
+    }
+
     // Deferred monitored-fence signal (DXGK_OPERATION_SIGNAL_MONITORED_FENCE):
     // BuildPagingBuffer resolves the fence GPU VA, pins a kernel mapping of
     // the value cell, and stamps this command into the paging buffer's
@@ -165,6 +172,7 @@ class VioGpuCommand final : public HandleBase<"VIOGCOMM"_M, VioGpuCommand>
     // the submission path itself (profiling) and wants the fence to
     // complete without executing the DMA body.
     BOOLEAN m_NullRendering;
+    BOOLEAN m_KmdAuthored;
 
     // Outstanding async submissions where `this` is the complete_ctx.
     // Tracked so the dtor can assert no callback is still pending.

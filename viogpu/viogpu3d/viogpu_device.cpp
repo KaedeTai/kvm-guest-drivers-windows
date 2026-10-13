@@ -585,6 +585,7 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 
                 void **privateData = (void **)pPresent->pDmaBufferPrivateData;
                 *privateData = cmd->ToHandle();
+                cmd->SetKmdAuthored();
                 cmd->MirrorBody(pPresent->pDmaBufferPrivateData,
                                 pPresent->DmaBufferPrivateDataSize,
                                 body,
