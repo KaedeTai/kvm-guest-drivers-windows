@@ -1144,67 +1144,40 @@ VioGpu3DDdiCreateContext(_In_ CONST HANDLE hDevice, _Inout_ DXGKARG_CREATECONTEX
     VioGpuDevice *pDevice = VioGpuDevice::FromHandle(hDevice);
     VIOGPU_ASSERT_CHK(pDevice != NULL);
 
-    if (pCreateContext->Flags.GdiContext || pCreateContext->Flags.SystemContext) {
-        DbgPrint(TRACE_LEVEL_WARNING, ("<---> %s context type: System(%d) GDI(%d) \n",
-                                       __FUNCTION__,
-                                       pCreateContext->Flags.SystemContext,
-                                       pCreateContext->Flags.GdiContext));
+    const BOOLEAN kernelContext = pCreateContext->Flags.GdiContext || pCreateContext->Flags.SystemContext;
+    DbgPrint(kernelContext ? TRACE_LEVEL_WARNING : TRACE_LEVEL_VERBOSE,
+             ("<---> %s context type: System(%d) GDI(%d) virtual-addressing(%d)\n",
+              __FUNCTION__,
+              pCreateContext->Flags.SystemContext,
+              pCreateContext->Flags.GdiContext,
+              pCreateContext->Flags.VirtualAddressing));
 
-        pCreateContext->hContext = pDevice->ToHandle();
+    pCreateContext->hContext = pDevice->ToHandle();
 
-        pCreateContext->ContextInfo.DmaBufferSize = 1024 * 1024;
-        // Per-command side-band: the mirror struct lets build-phase DDIs
-        // carry the DMA body to SubmitCommandVirtual by value (GPU VAs are
-        // not CPU-mappable).
-        pCreateContext->ContextInfo.DmaBufferPrivateDataSize = sizeof(VIOGPU_DMA_PRIVATE);
+    pCreateContext->ContextInfo.DmaBufferSize = 1024 * 1024;
+    // Per-command side-band: the mirror struct lets build-phase DDIs carry the
+    // DMA body to SubmitCommandVirtual by value (GPU VAs are not CPU-mappable).
+    pCreateContext->ContextInfo.DmaBufferPrivateDataSize = sizeof(VIOGPU_DMA_PRIVATE);
 
-        pCreateContext->ContextInfo.AllocationListSize = DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT;
-        pCreateContext->ContextInfo.PatchLocationListSize = DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT;
+    // GpuMmu virtual contexts (Flags.VirtualAddressing) submit by GPU VA
+    // through DxgkDdiSubmitCommandVirtual; the list sizes are unused there.
+    pCreateContext->ContextInfo.AllocationListSize = kernelContext ? DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT : 1024;
+    pCreateContext->ContextInfo.PatchLocationListSize = kernelContext ? DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT : 1024;
 
-        // Explicit (zero) context caps; single node, so the paging
-        // companion is node 0.
-        pCreateContext->ContextInfo.Caps.Value = 0;
-        pCreateContext->ContextInfo.PagingCompanionNodeId = 0;
-        // DMA buffers must live in the aperture segment (bit 0 =
-        // segment 1).  Leaving the set at 0 makes VidMm take its
-        // legacy contiguous-memory path (MSDN: "allocates contiguous
-        // paged-locked memory") which never creates an allocation
-        // object -- and 26100's GPU-VA pool mapping then dereferences
-        // that never-created allocation (AddDmaBufferToPool AV at
-        // NULL+8, bugcheck 0x3B) when the privileged pool of the CDD
-        // context is built.  MSDN: only APERTURE segments may appear
-        // in DmaBufferSegmentSet.
-        pCreateContext->ContextInfo.DmaBufferSegmentSet = 0x1;
+    // Explicit (zero) context caps; single node, so the paging companion is
+    // node 0.
+    pCreateContext->ContextInfo.Caps.Value = 0;
+    pCreateContext->ContextInfo.PagingCompanionNodeId = 0;
+    // DMA buffers must live in the aperture segment (bit 0 = segment 1).
+    // Leaving the set at 0 makes VidMm take its legacy contiguous-memory path
+    // (MSDN: "allocates contiguous paged-locked memory") which never creates
+    // an allocation object -- and 26100's GPU-VA pool mapping then
+    // dereferences that never-created allocation (AddDmaBufferToPool AV at
+    // NULL+8, bugcheck 0x3B) when the privileged pool of the CDD context is
+    // built.  MSDN: only APERTURE segments may appear in DmaBufferSegmentSet.
+    pCreateContext->ContextInfo.DmaBufferSegmentSet = 0x1;
 
-        return STATUS_SUCCESS;
-    } else {
-        pCreateContext->hContext = pDevice->ToHandle();
-
-        pCreateContext->ContextInfo.DmaBufferSize = 1024 * 1024;
-        // Per-command side-band: the mirror struct lets build-phase DDIs
-        // carry the DMA body to SubmitCommandVirtual by value (GPU VAs are
-        // not CPU-mappable).
-        pCreateContext->ContextInfo.DmaBufferPrivateDataSize = sizeof(VIOGPU_DMA_PRIVATE);
-
-        // GpuMmu virtual contexts (Flags.VirtualAddressing) submit by GPU
-        // VA through DxgkDdiSubmitCommandVirtual; the allocation/patch-
-        // location list sizes are simply unused on that path.
-        pCreateContext->ContextInfo.AllocationListSize = 1024;
-        pCreateContext->ContextInfo.PatchLocationListSize = 1024;
-
-        // Explicit (zero) context caps; single node, so the paging
-        // companion is node 0.
-        pCreateContext->ContextInfo.Caps.Value = 0;
-        pCreateContext->ContextInfo.PagingCompanionNodeId = 0;
-        // Aperture segment only -- see the GDI/System branch above.
-        pCreateContext->ContextInfo.DmaBufferSegmentSet = 0x1;
-        DbgPrint(TRACE_LEVEL_VERBOSE,
-                 ("<---> %s virtual-addressing context: %d\n",
-                  __FUNCTION__,
-                  pCreateContext->Flags.VirtualAddressing));
-
-        return STATUS_SUCCESS;
-    }
+    return STATUS_SUCCESS;
 };
 
 NTSTATUS
