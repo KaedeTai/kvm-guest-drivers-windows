@@ -906,6 +906,48 @@ NTSTATUS VioGpuAdapter::QueryDeviceDescriptor(_In_ ULONG ChildUid, _Inout_ DXGK_
     return STATUS_MONITOR_NO_MORE_DESCRIPTOR_DATA;
 }
 
+// The segment topology shared by DXGKQAITYPE_QUERYSEGMENT3 and 4: segment 1
+// is the CPU-invisible aperture, optional segment 2 the CPU-visible host
+// shmem window.
+template <typename SEGMENTOUT> static void FillPagingBufferInfo(SEGMENTOUT *pSegmentInfo)
+{
+    // Room for the monitored-fence deferral to stamp a VIOGPU_DMA_PRIVATE
+    // into each paging buffer's private data (SIGNAL_MONITORED_FENCE); 0
+    // forces the build-time early write and pollers see fence values before
+    // the GPU work completes.
+    pSegmentInfo->PagingBufferPrivateDataSize = sizeof(VIOGPU_DMA_PRIVATE);
+    // 0 = paging buffers from SYSTEM memory.  Segment 1 is the CPU-INVISIBLE
+    // aperture: pointing the paging pool there leaves
+    // VIDMM_DMA_POOL::BeginCPUAccess with nothing to map, and every TDR's
+    // debug-info collection bugchecks 0x7E instead of recovering.
+    pSegmentInfo->PagingBufferSegmentId = 0;
+    pSegmentInfo->PagingBufferSize = 10 * PAGE_SIZE;
+}
+
+template <typename DESC> static void FillApertureSegment(DESC *pDesc)
+{
+    pDesc->BaseAddress.QuadPart = 0xC0000000;
+    pDesc->Size = (SIZE_T)256 * 1024 * 4096;
+    pDesc->CommitLimit = (SIZE_T)256 * 1024 * 4096;
+    pDesc->Flags.Aperture = TRUE;
+    pDesc->Flags.CacheCoherent = TRUE;
+    pDesc->Flags.CpuVisible = FALSE;
+    pDesc->Flags.DirectFlip = TRUE;
+}
+
+template <typename DESC> void VioGpuAdapter::FillShmemSegment(DESC *pDesc)
+{
+    pDesc->BaseAddress.QuadPart = VioGpuAdapter::SHMEM_GPU_BASE_VA;
+    pDesc->Size = m_VioDev.shmem.length;
+    pDesc->CommitLimit = m_VioDev.shmem.length;
+    pDesc->CpuTranslatedAddress.QuadPart = m_PciResources.GetPciBar(m_VioDev.shmem.bar)->GetPA().QuadPart +
+                                           m_VioDev.shmem.offset;
+    pDesc->Flags.Aperture = FALSE;
+    pDesc->Flags.CacheCoherent = TRUE;
+    pDesc->Flags.CpuVisible = TRUE;
+    pDesc->Flags.DirectFlip = TRUE;
+}
+
 NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQueryAdapterInfo)
 {
     PAGED_CODE();
@@ -1054,71 +1096,24 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 if (pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_QUERYSEGMENTOUT3))
                 {
                     DbgPrint(TRACE_LEVEL_ERROR,
-                             ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(DXGK_QUERYSEGMENTOUT) "
+                             ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(DXGK_QUERYSEGMENTOUT3) "
                               "(0x%u)\n",
                               pQueryAdapterInfo->OutputDataSize,
-                              sizeof(DXGK_QUERYSEGMENTOUT)));
+                              sizeof(DXGK_QUERYSEGMENTOUT3)));
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
-                DbgPrint(TRACE_LEVEL_VERBOSE, ("QUERY SEG\n"));
                 DXGK_QUERYSEGMENTOUT3 *pSegmentInfo = (DXGK_QUERYSEGMENTOUT3 *)pQueryAdapterInfo->pOutputData;
-
-                if (m_VioDev.shmem.available)
-                {
-                    pSegmentInfo->NbSegment = 2;
-                }
-                else
-                {
-                    pSegmentInfo->NbSegment = 1;
-                }
-
+                const UINT nbSegments = m_VioDev.shmem.available ? 2 : 1;
+                pSegmentInfo->NbSegment = nbSegments;
                 if (pSegmentInfo->pSegmentDescriptor)
                 {
-                    DXGK_SEGMENTDESCRIPTOR3 *pSegmentDesc = pSegmentInfo->pSegmentDescriptor;
-                    memset(pSegmentDesc, 0, sizeof(*pSegmentDesc) * pSegmentInfo->NbSegment);
-
-                    // Room for the monitored-fence deferral to stamp a
-                    // VIOGPU_DMA_PRIVATE into each paging buffer's private
-                    // data (SIGNAL_MONITORED_FENCE); 0 forces the build-time
-                    // early write and pollers see fence values before the GPU
-                    // work completes.
-                    pSegmentInfo->PagingBufferPrivateDataSize = sizeof(VIOGPU_DMA_PRIVATE);
-
-                    // 0 = paging buffers from SYSTEM memory.  Segment 1 is the
-                    // CPU-INVISIBLE aperture: pointing the paging pool there
-                    // leaves VIDMM_DMA_POOL::BeginCPUAccess with nothing to
-                    // map, and every TDR's debug-info collection bugchecks
-                    // 0x7E instead of recovering (dxgmms1 null-class AV).
-                    // VBoxMPWddm uses 0 as well.
-                    pSegmentInfo->PagingBufferSegmentId = 0;
-                    pSegmentInfo->PagingBufferSize = 10 * PAGE_SIZE;
-
-                    //
-                    // Fill out aperture segment descriptor
-                    //
-                    pSegmentDesc[0].BaseAddress.QuadPart = 0xC0000000;
-                    // (SIZE_T) so the product is not evaluated in int -- 1GiB
-                    // fits today, but doubling the constant would overflow.
-                    pSegmentDesc[0].Size = (SIZE_T)256 * 1024 * 4096;
-                    pSegmentDesc[0].CommitLimit = (SIZE_T)256 * 1024 * 4096;
-                    // pSegmentDesc[0].CpuTranslatedAddress.QuadPart = 0xFFFFFFFE00000000;
-                    pSegmentDesc[0].Flags.Aperture = TRUE;
-                    pSegmentDesc[0].Flags.CacheCoherent = TRUE;
-                    pSegmentDesc[0].Flags.CpuVisible = FALSE;
-                    pSegmentDesc[0].Flags.DirectFlip = TRUE;
-
-                    if (m_VioDev.shmem.available)
+                    RtlZeroMemory(pSegmentInfo->pSegmentDescriptor, sizeof(DXGK_SEGMENTDESCRIPTOR3) * nbSegments);
+                    FillPagingBufferInfo(pSegmentInfo);
+                    FillApertureSegment(&pSegmentInfo->pSegmentDescriptor[0]);
+                    if (nbSegments == 2)
                     {
-                        pSegmentDesc[1].BaseAddress.QuadPart = VioGpuAdapter::SHMEM_GPU_BASE_VA;
-                        pSegmentDesc[1].Size = m_VioDev.shmem.length;
-                        pSegmentDesc[1].CommitLimit = m_VioDev.shmem.length;
-                        // FIXME: is this correct?
-                        pSegmentDesc[1].CpuTranslatedAddress.QuadPart = m_PciResources.GetPciBar(m_VioDev.shmem.bar)->GetPA().QuadPart + m_VioDev.shmem.offset;
-                        pSegmentDesc[1].Flags.Aperture = FALSE; // TRUE?
-                        pSegmentDesc[1].Flags.CacheCoherent = TRUE;
-                        pSegmentDesc[1].Flags.CpuVisible = TRUE;
-                        pSegmentDesc[1].Flags.DirectFlip = TRUE;
+                        FillShmemSegment(&pSegmentInfo->pSegmentDescriptor[1]);
                     }
                 }
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Requested segments\n", __FUNCTION__));
@@ -1141,13 +1136,8 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
-                DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s QUERYSEGMENT4\n", __FUNCTION__));
                 DXGK_QUERYSEGMENTOUT4 *pSegmentInfo = (DXGK_QUERYSEGMENTOUT4 *)pQueryAdapterInfo->pOutputData;
-
-                // Same segment topology as QUERYSEGMENT3 above: segment 1 is
-                // the CPU-invisible aperture, optional segment 2 the
-                // CPU-visible host shmem window.
-                UINT nbSegments = m_VioDev.shmem.available ? 2 : 1;
+                const UINT nbSegments = m_VioDev.shmem.available ? 2 : 1;
 
                 // Two-call contract: the first call has NbSegment == 0 (and no
                 // descriptor array); report only the segment count and touch
@@ -1159,12 +1149,7 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 }
 
                 pSegmentInfo->NbSegment = nbSegments;
-                // Room for the monitored-fence deferral (see QUERYSEGMENT3).
-                pSegmentInfo->PagingBufferPrivateDataSize = sizeof(VIOGPU_DMA_PRIVATE);
-                // 0 = paging buffers from SYSTEM memory (0x7E-on-TDR when
-                // pointed at the CPU-invisible aperture; VBoxMPWddm uses 0).
-                pSegmentInfo->PagingBufferSegmentId = 0;
-                pSegmentInfo->PagingBufferSize = 10 * PAGE_SIZE;
+                FillPagingBufferInfo(pSegmentInfo);
 
                 // pSegmentDescriptor is a BYTE* stride array: dxgkrnl OWNS
                 // SegmentDescriptorStride (its per-element size, matching the
@@ -1181,34 +1166,10 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                     return STATUS_INVALID_PARAMETER;
                 }
                 RtlZeroMemory(pSegmentInfo->pSegmentDescriptor, stride * nbSegments);
-
-                //
-                // Segment 1: aperture (mirrors pSegmentDesc[0] of the v3 arm).
-                //
-                DXGK_SEGMENTDESCRIPTOR4 *pDesc = (DXGK_SEGMENTDESCRIPTOR4 *)pSegmentInfo->pSegmentDescriptor;
-                pDesc->BaseAddress.QuadPart = 0xC0000000;
-                pDesc->Size = 256 * 1024 * 4096;
-                pDesc->CommitLimit = 256 * 1024 * 4096;
-                pDesc->Flags.Aperture = TRUE;
-                pDesc->Flags.CacheCoherent = TRUE;
-                pDesc->Flags.CpuVisible = FALSE;
-                pDesc->Flags.DirectFlip = TRUE;
-
+                FillApertureSegment((DXGK_SEGMENTDESCRIPTOR4 *)pSegmentInfo->pSegmentDescriptor);
                 if (nbSegments == 2)
                 {
-                    //
-                    // Segment 2: CPU-visible shmem (mirrors pSegmentDesc[1]).
-                    //
-                    pDesc = (DXGK_SEGMENTDESCRIPTOR4 *)(pSegmentInfo->pSegmentDescriptor + stride);
-                    pDesc->BaseAddress.QuadPart = VioGpuAdapter::SHMEM_GPU_BASE_VA;
-                    pDesc->Size = m_VioDev.shmem.length;
-                    pDesc->CommitLimit = m_VioDev.shmem.length;
-                    pDesc->CpuTranslatedAddress.QuadPart = m_PciResources.GetPciBar(m_VioDev.shmem.bar)->GetPA().QuadPart +
-                                                           m_VioDev.shmem.offset;
-                    pDesc->Flags.Aperture = FALSE;
-                    pDesc->Flags.CacheCoherent = TRUE;
-                    pDesc->Flags.CpuVisible = TRUE;
-                    pDesc->Flags.DirectFlip = TRUE;
+                    FillShmemSegment((DXGK_SEGMENTDESCRIPTOR4 *)(pSegmentInfo->pSegmentDescriptor + stride));
                 }
 
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Requested segments (v4)\n", __FUNCTION__));
