@@ -663,6 +663,7 @@ class VioGpuAdapter final : public HandleBase<"VIOGADAP"_M, VioGpuAdapter>, IVio
         BOOLEAN Consumed;
         BOOLEAN Expired;      // deadline completed the parked consumers early
         ULONGLONG ParkTime;   // KeQueryInterruptTime at first consumer park; 0 = none
+        ULONGLONG FiredAt;    // KeQueryInterruptTime of a fire nobody had consumed yet
         LIST_ENTRY Consumers; // GATE_CONSUMER
     };
     NTSTATUS GateArm(class VioGpuDevice *pDevice, ULONG ringIdx, ULONGLONG *outToken);

@@ -1983,6 +1983,10 @@ void VioGpuAdapter::GateFenceCb(void *ctx, void *, void *)
     {
         RemoveEntryList(&g->Entry);
     }
+    else
+    {
+        g->FiredAt = KeQueryInterruptTime();
+    }
     KeReleaseSpinLock(&pAdapter->m_GateLock, oldIrql);
 
     while (!IsListEmpty(&consumers))
@@ -2094,13 +2098,26 @@ VOID VioGpuAdapter::GateExpiryDpcRoutine(_In_ struct _KDPC *Dpc,
 
     LIST_ENTRY expired;
     InitializeListHead(&expired);
+    LIST_ENTRY reaped;
+    InitializeListHead(&reaped);
     const ULONGLONG now = KeQueryInterruptTime();
 
     KIRQL oldIrql;
     KeAcquireSpinLock(&a->m_GateLock, &oldIrql);
-    for (LIST_ENTRY *e = a->m_GateList.Flink; e != &a->m_GateList; e = e->Flink)
+    for (LIST_ENTRY *e = a->m_GateList.Flink; e != &a->m_GateList;)
     {
         GATE_TOKEN_CTX *g = CONTAINING_RECORD(e, GATE_TOKEN_CTX, Entry);
+        e = e->Flink;
+        // A fired token whose GATE packet never arrived (its submit failed, or
+        // the process died between arm and submit) would otherwise stay listed
+        // until teardown.  A GATE arriving after the reap finds no entry and
+        // completes at once, which is right for a token that has fired.
+        if (g->Fired && !g->Consumed && now - g->FiredAt >= VIOGPU_GATE_PARK_DEADLINE_100NS)
+        {
+            RemoveEntryList(&g->Entry);
+            InsertTailList(&reaped, &g->Entry);
+            continue;
+        }
         if (g->Fired || g->ParkTime == 0 || IsListEmpty(&g->Consumers))
         {
             continue;
@@ -2131,6 +2148,10 @@ VOID VioGpuAdapter::GateExpiryDpcRoutine(_In_ struct _KDPC *Dpc,
         GATE_CONSUMER *c = CONTAINING_RECORD(RemoveHeadList(&expired), GATE_CONSUMER, Entry);
         c->Cb(c->Ctx, NULL, NULL);
         delete c;
+    }
+    while (!IsListEmpty(&reaped))
+    {
+        delete CONTAINING_RECORD(RemoveHeadList(&reaped), GATE_TOKEN_CTX, Entry);
     }
 
     // Same deadline for packet-gated presents: a present token that never
