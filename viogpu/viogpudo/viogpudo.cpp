@@ -821,6 +821,7 @@ VOID VioGpuDod::BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalInfo
     pVideoSignalInfo->VideoStandard = D3DKMDT_VSS_OTHER;
     pVideoSignalInfo->TotalSize.cx = pModeInfo->VisScreenWidth;
     pVideoSignalInfo->TotalSize.cy = pModeInfo->VisScreenHeight;
+    pVideoSignalInfo->ActiveSize = pVideoSignalInfo->TotalSize;
 
     pVideoSignalInfo->VSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
     pVideoSignalInfo->VSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
@@ -838,14 +839,32 @@ NTSTATUS VioGpuDod::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INTER
     PAGED_CODE();
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    UNREFERENCED_PARAMETER(pVidPnPinnedSourceModeInfo);
+    UNREFERENCED_PARAMETER(SourceId);
 
     D3DKMDT_VIDPN_TARGET_MODE *pVidPnTargetModeInfo = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    for (UINT ModeIndex = 0; ModeIndex < m_pHWDevice->GetModeCount(); ++ModeIndex)
+    // With a pinned source mode, only the target whose raster equals the
+    // pinned visible region is cofunctional: QueryVidPnHWCapability reports
+    // no driver scaling.  Deriving it from the pinned mode also covers a
+    // source mode that is not in the table (the custom-resolution slot).
+    VIDEO_MODE_INFORMATION PinnedMode;
+    const BOOLEAN HavePinnedSource = (pVidPnPinnedSourceModeInfo != NULL);
+    UINT ModeCount = (UINT)m_pHWDevice->GetModeCount();
+
+    if (HavePinnedSource)
     {
-        PVIDEO_MODE_INFORMATION pModeInfo = m_pHWDevice->GetModeInfo(SourceId);
+        RtlZeroMemory(&PinnedMode, sizeof(PinnedMode));
+        PinnedMode.Length = sizeof(PinnedMode);
+        PinnedMode.VisScreenWidth = pVidPnPinnedSourceModeInfo->Format.Graphics.VisibleRegionSize.cx;
+        PinnedMode.VisScreenHeight = pVidPnPinnedSourceModeInfo->Format.Graphics.VisibleRegionSize.cy;
+        PinnedMode.ScreenStride = (PinnedMode.VisScreenWidth * 4 + 3) & ~0x3;
+        ModeCount = 1;
+    }
+
+    for (UINT ModeIndex = 0; ModeIndex < ModeCount; ++ModeIndex)
+    {
+        PVIDEO_MODE_INFORMATION pModeInfo = HavePinnedSource ? &PinnedMode : m_pHWDevice->GetModeInfo(ModeIndex);
         pVidPnTargetModeInfo = NULL;
         Status = pVidPnTargetModeSetInterface->pfnCreateNewModeInfo(hVidPnTargetModeSet, &pVidPnTargetModeInfo);
         if (!NT_SUCCESS(Status))
@@ -856,7 +875,6 @@ NTSTATUS VioGpuDod::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INTER
                       LONG_PTR(hVidPnTargetModeSet)));
             return Status;
         }
-        pVidPnTargetModeInfo->VideoSignalInfo.ActiveSize = pVidPnTargetModeInfo->VideoSignalInfo.TotalSize;
         BuildVideoSignalInfo(&pVidPnTargetModeInfo->VideoSignalInfo, pModeInfo);
 
         if (pModeInfo->VisScreenWidth == NOM_WIDTH_SIZE && pModeInfo->VisScreenHeight == NOM_HEIGHT_SIZE)
