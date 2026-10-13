@@ -1686,6 +1686,15 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                     DbgPrint(TRACE_LEVEL_ERROR, ("%s no hDdevice(context) supplied\n", __FUNCTION__));
                     return STATUS_INVALID_PARAMETER;
                 }
+                const UINT capsetId = pVioGpuEscape->CtxInit.CapsetID;
+                if (capsetId == 0 || capsetId > VIRTIO_GPU_MAX_CAPSET_ID ||
+                    !(m_supportedCapsetIDs & (1ull << capsetId)))
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR, ("%s CTX_INIT capset id %u not supported\n", __FUNCTION__, capsetId));
+                    return STATUS_INVALID_PARAMETER_1;
+                }
+                // VioGpuContext::Init logs the name with %s.
+                pVioGpuEscape->CtxInit.DebugName[sizeof(pVioGpuEscape->CtxInit.DebugName) - 1] = 0;
                 pDevice->m_Context.Init(&pVioGpuEscape->CtxInit);
                 // The UMD references the context by its virtio id when it
                 // targets cross-device submits (IMPORT present_ctx_id).
