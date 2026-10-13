@@ -716,9 +716,9 @@ class VioGpuAdapter final : public HandleBase<"VIOGADAP"_M, VioGpuAdapter>, IVio
     // monitored-fence command, NULL when none is outstanding.  VidMm batches
     // several paging operations into one buffer and the driver hands the
     // private data back unadvanced, so every operation sees the same slot:
-    // without this, the entry-time clear that rejects a recycled buffer's
-    // stale command pointer would also erase a stamp an earlier operation in
-    // the same batch had just placed.  Written at PASSIVE from
+    // without this, the entry-time reclaim of a recycled buffer's leftover
+    // cookie would also reclaim the stamp an earlier operation in the same
+    // batch had just placed.  Written at PASSIVE from
     // DxgkDdiBuildPagingBuffer, cleared from the submit DDIs at DISPATCH.
     void *volatile m_PagingStampPriv = NULL;
 

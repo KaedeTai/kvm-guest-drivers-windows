@@ -71,6 +71,10 @@ VioGpuDevice::~VioGpuDevice()
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s", __FUNCTION__));
+
+    // The stamp table compares device pointers, so nothing may stay bound
+    // to this one once its address can be reused.
+    m_pAdapter->commander.FreeStamped(this);
 }
 
 NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuDeviceAllocation *srcDev, VioGpuDeviceAllocation *dstDev)
@@ -343,15 +347,9 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s\n", __FUNCTION__));
 
-    // DMA buffers (and their private-data area) are RECYCLED by dxgkrnl.
-    // Every path below that returns without storing a VioGpuCommand*
-    // (windowed flips with no present bytes, error exits) would leave a
-    // STALE pointer from the buffer's previous user; SubmitCommand then
-    // resurrects that command and PrepareSubmit clobbers its fence id —
-    // fences complete wrongly or never (intermittent TDR at first
-    // windowed flip). NULL it up front; real writers below overwrite.
-    // Stamp the packet as ours so the submit phase recovers the command it
-    // carries and never mistakes a paging packet for one.
+    // Mark the private data as ours so the submit phase never mistakes this
+    // packet for a paging packet; paths below that build a command stamp its
+    // cookie over the cleared slot.
     VioGpuDmaPrivClaim(pPresent->pDmaBufferPrivateData, pPresent->DmaBufferPrivateDataSize);
 
     if (pPresent->Flags.Flip)
@@ -415,8 +413,8 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
                 hdr->ring_idx = 0;
                 RtlCopyMemory(body + sizeof(VIOGPU_COMMAND_HDR), &flipToken, sizeof(ULONGLONG));
 
-                void **privateData = (void **)pPresent->pDmaBufferPrivateData;
-                *privateData = cmd->ToHandle();
+                m_pAdapter->commander.StampInto(cmd, this, pPresent->pDmaBufferPrivateData,
+                                                pPresent->DmaBufferPrivateDataSize);
                 cmd->SetKmdAuthored();
                 cmd->MirrorBody(pPresent->pDmaBufferPrivateData,
                                 pPresent->DmaBufferPrivateDataSize,
@@ -457,8 +455,8 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
     }
     if (pPresent->pDmaBuffer)
     {
-        void **privateData = (void **)pPresent->pDmaBufferPrivateData;
-        *privateData = cmd->ToHandle();
+        m_pAdapter->commander.StampInto(cmd, this, pPresent->pDmaBufferPrivateData,
+                                        pPresent->DmaBufferPrivateDataSize);
     }
 
     cmd->SetDmaBuf((char *)pPresent->pDmaBuffer);
@@ -512,14 +510,7 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
                                                    DXGK_PRESENT_MAX_INDEX + 1);
     if (!NT_SUCCESS(attachStatus))
     {
-        if (pPresent->pDmaBufferPrivateData)
-        {
-            VioGpuCommand **privateData = (VioGpuCommand **)pPresent->pDmaBufferPrivateData;
-            if (*privateData == cmd)
-            {
-                *privateData = NULL;
-            }
-        }
+        m_pAdapter->commander.Unstamp(cmd);
         delete cmd;
         return attachStatus;
     }
@@ -577,14 +568,7 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
     DbgPrint(TRACE_LEVEL_INFORMATION,
              ("%s unsupported Present flags=0x%x\n", __FUNCTION__,
               pPresent->Flags.Value));
-    if (pPresent->pDmaBufferPrivateData)
-    {
-        VioGpuCommand **privateData = (VioGpuCommand **)pPresent->pDmaBufferPrivateData;
-        if (*privateData == cmd)
-        {
-            *privateData = NULL;
-        }
-    }
+    m_pAdapter->commander.Unstamp(cmd);
     delete cmd;
     return STATUS_NOT_SUPPORTED;
 }
@@ -594,10 +578,7 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 
-    // See Present: recycled DMA private data must never carry a stale
-    // command pointer into SubmitCommand (multipass/error exits below
-    // return before the real write).
-    // Stamp as ours (see Present).
+    // See Present.
     VioGpuDmaPrivClaim(pRender->pDmaBufferPrivateData, pRender->DmaBufferPrivateDataSize);
 
     char *pDmaBufStart = (char *)pRender->pDmaBuffer;
@@ -671,8 +652,8 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
     }
     if (pRender->pDmaBuffer)
     {
-        void **privateData = (void **)pRender->pDmaBufferPrivateData;
-        *privateData = cmd->ToHandle();
+        m_pAdapter->commander.StampInto(cmd, this, pRender->pDmaBufferPrivateData,
+                                        pRender->DmaBufferPrivateDataSize);
     }
     cmd->SetDmaBuf(pDmaBufStart);
     cmd->AttachAllocations(pRender->pAllocationList, pRender->AllocationListSize);

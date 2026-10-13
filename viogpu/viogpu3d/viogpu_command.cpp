@@ -3,6 +3,10 @@
 #include "viogpu_adapter.h"
 #include "baseobj.h"
 
+// Declared only in ntifs.h, which cannot coexist with the ntddk.h this
+// display miniport pulls in.
+extern "C" NTSYSAPI ULONG NTAPI RtlRandomEx(_Inout_ PULONG Seed);
+
 #pragma code_seg(push)
 #pragma code_seg()
 
@@ -26,9 +30,11 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
     m_pEnd = NULL;
     m_privBodyCopy = NULL;
     m_privBodySize = 0;
-    m_pPriv = NULL;
-    m_PrivSize = 0;
-    m_PrivVirtual = FALSE;
+    m_StampEntry.Flink = NULL;
+    m_StampEntry.Blink = NULL;
+    m_Cookie = 0;
+    m_pStampDevice = NULL;
+    m_Stamped = FALSE;
     m_MFenceKva = NULL;
     m_MFencePhys = 0;
     m_MFenceValue = 0;
@@ -65,6 +71,8 @@ VioGpuCommand::~VioGpuCommand()
         delete[] m_privBodyCopy;
         m_privBodyCopy = NULL;
     }
+
+    m_pCommander->Unstamp(this);
 }
 
 void VioGpuCommand::AddPending()
@@ -102,9 +110,6 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
     // VA; a packet with no mirror completes fence-only.
     RecoverMirroredBody(pSubmitCommand->pDmaBufferPrivateData,
                         pSubmitCommand->DmaBufferPrivateDataSize);
-    m_pPriv = pSubmitCommand->pDmaBufferPrivateData;
-    m_PrivSize = pSubmitCommand->DmaBufferPrivateDataSize;
-    m_PrivVirtual = FALSE;
     m_pDevice = VioGpuDevice::FromHandle(pSubmitCommand->hContext);
 
     // Capture the only submit flag we react to. Paging / ContextSwitch /
@@ -221,9 +226,6 @@ void VioGpuCommand::PrepareSubmitVirtual(const DXGKARG_SUBMITCOMMANDVIRTUAL *pSu
     // pointer, so the body rides the private-data mirror.
     RecoverMirroredBody(pSubmitCommand->pDmaBufferPrivateData,
                         pSubmitCommand->DmaBufferPrivateDataSize);
-    m_pPriv = pSubmitCommand->pDmaBufferPrivateData;
-    m_PrivSize = pSubmitCommand->DmaBufferPrivateDataSize;
-    m_PrivVirtual = TRUE;
 
     m_pDevice = VioGpuDevice::FromHandle(pSubmitCommand->hContext);
     m_NullRendering = pSubmitCommand->Flags.NullRendering ? TRUE : FALSE;
@@ -664,34 +666,35 @@ void VioGpuCommand::Discard()
 {
     PAGED_CODE();
 
-    // The private data outlives this call: dxgkrnl keeps the packet it is
-    // about to resubmit.  A monitored-fence signal must NOT be written
-    // here -- the packets queued ahead of it were handed back too and have
-    // not executed -- it rides along to the resubmission instead.
-    const BOOLEAN virt = m_PrivVirtual && m_PrivSize >= sizeof(VIOGPU_DMA_PRIVATE) &&
-                         ((VIOGPU_DMA_PRIVATE *)m_pPriv)->magic == VIOGPU_DMA_PRIV_MAGIC;
-    const BOOLEAN legacy = !m_PrivVirtual && m_PrivSize >= sizeof(void *);
-    if (m_pPriv && (virt || legacy))
+    // A monitored-fence signal must NOT be written here -- the packets queued
+    // ahead of it were handed back too and have not executed -- it rides
+    // along to the resubmission instead.
+    if (m_Cookie != 0)
     {
         DbgPrint(TRACE_LEVEL_ERROR,
                  ("<---> %s fence_id=%d re-owned by dxgkrnl at preempt ack; parked for resubmission\n",
                   __FUNCTION__, m_FenceId));
-        if (virt)
-        {
-            ((VIOGPU_DMA_PRIVATE *)m_pPriv)->cmdRaw = (ULONGLONG)(ULONG_PTR)ToHandle();
-        }
-        else
-        {
-            *(void **)m_pPriv = ToHandle();
-        }
+        m_pCommander->Restamp(this);
         return;
     }
 
-    // No private data: nothing was recovered from the packet (fence-only)
-    // and nothing needs to survive to the resubmission.
+    // Unstamped: whatever the resubmission needs it rebuilds from the
+    // packet's private data.
     DbgPrint(TRACE_LEVEL_ERROR,
              ("<---> %s fence_id=%d re-owned by dxgkrnl at preempt ack; fence-only, freed\n",
               __FUNCTION__, m_FenceId));
+    FreeUnrun();
+}
+
+void VioGpuCommand::FreeUnrun()
+{
+    PAGED_CODE();
+
+    if (m_MFenceKva != NULL)
+    {
+        m_pAdapter->MFenceMapUnpin(m_MFencePhys);
+        m_MFenceKva = NULL;
+    }
     if (m_allocations)
     {
         for (UINT i = 0; i < m_allocationsLength; i++)
@@ -704,6 +707,20 @@ void VioGpuCommand::Discard()
         delete[] m_allocations;
         m_allocations = NULL;
     }
+    delete this;
+}
+
+void VioGpuCommand::FreeOrphan()
+{
+    PAGED_CODE();
+
+    if (m_MFenceKva != NULL)
+    {
+        m_pAdapter->MFenceMapUnpin(m_MFencePhys);
+        m_MFenceKva = NULL;
+    }
+    delete[] m_allocations;
+    m_allocations = NULL;
     delete this;
 }
 
@@ -832,6 +849,10 @@ VioGpuCommander::VioGpuCommander(VioGpuAdapter *pAdapter)
     KeInitializeSpinLock(&m_Lock);
 
     m_running = 0;
+    KeInitializeSpinLock(&m_StampLock);
+    InitializeListHead(&m_StampList);
+    m_StampCounter = 0;
+    m_StampSecret = 0;
     m_PreemptHold = FALSE;
     m_LastDequeuedFenceId = 0;
     m_DropActive = FALSE;
@@ -844,6 +865,10 @@ NTSTATUS VioGpuCommander::Start()
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
 
     HANDLE threadHandle = 0;
+
+    LARGE_INTEGER pc = KeQueryPerformanceCounter(NULL);
+    ULONG seed = pc.LowPart ^ (ULONG)(ULONG_PTR)this;
+    m_StampSecret = ((ULONGLONG)RtlRandomEx(&seed) << 32) | RtlRandomEx(&seed);
 
     NTSTATUS status = PsCreateSystemThread(&threadHandle,
                                            (ACCESS_MASK)0,
@@ -915,6 +940,8 @@ void VioGpuCommander::Stop()
 
     ObDereferenceObject(m_pWorkThread);
     m_pWorkThread = NULL;
+
+    FreeStamped(NULL);
 }
 
 void VioGpuCommander::ThreadWork(PVOID Context)
@@ -1118,17 +1145,15 @@ NTSTATUS VioGpuCommander::SubmitCommand(const DXGKARG_SUBMITCOMMAND *pSubmitComm
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s fence_id=%d\n", __FUNCTION__, pSubmitCommand->SubmissionFenceId));
 
+    // Consume-once lives in the stamp table: Take removes the command, so a
+    // resubmission of the same buffer (or a recycled buffer's stale cookie)
+    // finds nothing and builds a fresh fence-only command.  Resurrecting a
+    // command twice would double-insert it into the submit queue (0x139).
     VioGpuCommand *cmd = NULL;
-    if (pSubmitCommand->pDmaBufferPrivateData && pSubmitCommand->DmaBufferPrivateDataSize >= sizeof(void *))
+    if (pSubmitCommand->pDmaBufferPrivateData && pSubmitCommand->DmaBufferPrivateDataSize >= sizeof(ULONGLONG))
     {
-        cmd = VioGpuCommand::FromHandle(*(void **)pSubmitCommand->pDmaBufferPrivateData);
-        // Consume-once: dxgkrnl can resubmit the same DMA buffer (and
-        // recycles private data with it); resurrecting the same command
-        // object twice double-inserts it into the submit queue after it
-        // may already have run and been freed, which bugchecks 0x139
-        // CORRUPT_LIST_ENTRY in QueueSubmitted.  A later resubmission builds a
-        // fresh fence-only command instead.
-        *(void **)pSubmitCommand->pDmaBufferPrivateData = NULL;
+        cmd = Take(*(const ULONGLONG *)pSubmitCommand->pDmaBufferPrivateData,
+                   VioGpuDevice::FromHandle(pSubmitCommand->hContext));
         // Release the build-phase hold that kept this slot from being
         // cleared by later operations batched into the same paging buffer.
         InterlockedCompareExchangePointer(&m_pAdapter->m_PagingStampPriv,
@@ -1167,25 +1192,18 @@ NTSTATUS VioGpuCommander::SubmitCommandVirtual(const DXGKARG_SUBMITCOMMANDVIRTUA
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s fence_id=%d\n", __FUNCTION__, pSubmitCommand->SubmissionFenceId));
 
-    // Only recover a VioGpuCommand* from private data WE stamped: dxgkrnl
-    // paging packets reach this DDI too, and their private-data bytes are
-    // not ours -- interpreting them as a handle makes FromHandle do a
-    // virtual call through a garbage pointer (wild call, bugcheck 0x7E).
-    // The magic gate proves the data is a Present/Render packet.
+    // Only a cookie in our layout is looked up: dxgkrnl paging packets reach
+    // this DDI too with private data that is not ours.  User mode writes the
+    // whole block on virtual contexts, so the cookie must also be one the
+    // stamp table holds for this context.
     VioGpuCommand *cmd = NULL;
     if (pSubmitCommand->pDmaBufferPrivateData &&
         pSubmitCommand->DmaBufferPrivateDataSize >= sizeof(VIOGPU_DMA_PRIVATE))
     {
-        VIOGPU_DMA_PRIVATE *priv = (VIOGPU_DMA_PRIVATE *)pSubmitCommand->pDmaBufferPrivateData;
+        const VIOGPU_DMA_PRIVATE *priv = (const VIOGPU_DMA_PRIVATE *)pSubmitCommand->pDmaBufferPrivateData;
         if (priv->magic == VIOGPU_DMA_PRIV_MAGIC)
         {
-            // priv->cmdRaw is a pointer we stored (or NULL) -- FromHandle is
-            // safe on it.  Consume-once (see SubmitCommand): a
-            // resubmission of the same DMA buffer must not resurrect the
-            // same command object; the mirrored body stays in priv so a
-            // fresh command still re-executes it.
-            cmd = VioGpuCommand::FromHandle((void *)(ULONG_PTR)priv->cmdRaw);
-            priv->cmdRaw = 0;
+            cmd = Take(priv->cmdRaw, VioGpuDevice::FromHandle(pSubmitCommand->hContext));
             // See SubmitCommand: release the build-phase hold on this slot.
             InterlockedCompareExchangePointer(&m_pAdapter->m_PagingStampPriv,
                                               NULL,
@@ -1215,6 +1233,116 @@ NTSTATUS VioGpuCommander::SubmitCommandVirtual(const DXGKARG_SUBMITCOMMANDVIRTUA
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return STATUS_SUCCESS;
+}
+
+ULONGLONG VioGpuCommander::Stamp(VioGpuCommand *cmd, VioGpuDevice *pDevice)
+{
+    const ULONGLONG n = (ULONGLONG)InterlockedIncrement64(&m_StampCounter);
+    // The counter keeps cookies unique; the keyed low half makes them
+    // unguessable.  Never 0, which means "no command".
+    ULONGLONG cookie = (n << 32) | (ULONG)(((n * 0x9E3779B97F4A7C15ull) ^ m_StampSecret) >> 16);
+    if (cookie == 0)
+    {
+        cookie = 1;
+    }
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_StampLock, &oldIrql);
+    cmd->m_Cookie = cookie;
+    cmd->m_pStampDevice = pDevice;
+    cmd->m_Stamped = TRUE;
+    InsertTailList(&m_StampList, &cmd->m_StampEntry);
+    KeReleaseSpinLock(&m_StampLock, oldIrql);
+    return cookie;
+}
+
+void VioGpuCommander::StampInto(VioGpuCommand *cmd, VioGpuDevice *pDevice, void *priv, ULONG privSize)
+{
+    if (priv != NULL && privSize >= sizeof(ULONGLONG))
+    {
+        *(ULONGLONG *)priv = Stamp(cmd, pDevice);
+    }
+}
+
+void VioGpuCommander::Restamp(VioGpuCommand *cmd)
+{
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_StampLock, &oldIrql);
+    if (!cmd->m_Stamped)
+    {
+        cmd->m_Stamped = TRUE;
+        InsertTailList(&m_StampList, &cmd->m_StampEntry);
+    }
+    KeReleaseSpinLock(&m_StampLock, oldIrql);
+}
+
+void VioGpuCommander::Unstamp(VioGpuCommand *cmd)
+{
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_StampLock, &oldIrql);
+    if (cmd->m_Stamped)
+    {
+        RemoveEntryList(&cmd->m_StampEntry);
+        cmd->m_Stamped = FALSE;
+    }
+    KeReleaseSpinLock(&m_StampLock, oldIrql);
+}
+
+VioGpuCommand *VioGpuCommander::Take(ULONGLONG cookie, VioGpuDevice *pDevice)
+{
+    if (cookie == 0)
+    {
+        return NULL;
+    }
+    VioGpuCommand *found = NULL;
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_StampLock, &oldIrql);
+    for (LIST_ENTRY *e = m_StampList.Flink; e != &m_StampList; e = e->Flink)
+    {
+        VioGpuCommand *cmd = CONTAINING_RECORD(e, VioGpuCommand, m_StampEntry);
+        if (cmd->m_Cookie != cookie)
+        {
+            continue;
+        }
+        if (cmd->m_pStampDevice == NULL || cmd->m_pStampDevice == pDevice)
+        {
+            RemoveEntryList(&cmd->m_StampEntry);
+            cmd->m_Stamped = FALSE;
+            found = cmd;
+        }
+        break;
+    }
+    KeReleaseSpinLock(&m_StampLock, oldIrql);
+    return found;
+}
+
+void VioGpuCommander::FreeStamped(VioGpuDevice *pDevice)
+{
+    PAGED_CODE();
+
+    for (;;)
+    {
+        VioGpuCommand *cmd = NULL;
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&m_StampLock, &oldIrql);
+        for (LIST_ENTRY *e = m_StampList.Flink; e != &m_StampList; e = e->Flink)
+        {
+            VioGpuCommand *c = CONTAINING_RECORD(e, VioGpuCommand, m_StampEntry);
+            if (pDevice == NULL || c->m_pStampDevice == pDevice)
+            {
+                RemoveEntryList(e);
+                c->m_Stamped = FALSE;
+                cmd = c;
+                break;
+            }
+        }
+        KeReleaseSpinLock(&m_StampLock, oldIrql);
+        if (cmd == NULL)
+        {
+            break;
+        }
+        cmd->FreeOrphan();
+    }
 }
 
 _IRQL_requires_max_(DISPATCH_LEVEL) _IRQL_saves_global_(OldIrql,

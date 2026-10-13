@@ -15,10 +15,12 @@ class VioGpuCommander;
 // also runs for dxgkrnl-originated paging packets whose private data is not
 // ours (stale bytes), so a clear/mismatched magic means the packet completes
 // fence-only.  Only Present/Render/paging-signal packets stamp the magic.
+//
+// The cmdRaw slot carries an opaque cookie, never a pointer: on virtual
+// contexts user mode writes the whole block, so the submit DDIs only accept
+// a cookie the commander's stamp table holds (VioGpuCommander::Take).
 
-// Claim the packet's private data as ours (Present/Render entry).  Private
-// data too small for the mirror still gets its command pointer cleared, so a
-// recycled buffer cannot hand a stale pointer to the submit path.
+// Claim the packet's private data as ours (Present/Render entry).
 inline void VioGpuDmaPrivClaim(void *priv, ULONG privSize)
 {
     if (!priv || privSize < sizeof(ULONGLONG))
@@ -50,19 +52,29 @@ inline void VioGpuDmaPrivClaim(void *priv, ULONG privSize)
 // dereference freed memory.
 class VioGpuCommand final : public HandleBase<"VIOGCOMM"_M, VioGpuCommand>
 {
+    friend class VioGpuCommander;
+
   public:
     VioGpuCommand(VioGpuAdapter *adapter);
     ~VioGpuCommand();
 
     void Run();
     // Hand a queued, never-started command back to dxgkrnl at a preempt
-    // ack: it is re-stamped into the packet's private data (undoing the
-    // submit's consume-once) so the resubmission recovers this same object
-    // -- monitored-fence write, oversized-body capture, busy allocations --
-    // and executes it once, in resubmission order.  Nothing is executed
-    // or reported here.  A packet that carried no private data is
-    // fence-only and is simply freed.
+    // ack.  A stamped command goes back into the stamp table under its
+    // cookie (undoing the submit's consume-once): the resubmitted packet
+    // carries the same private data, so it recovers this same object --
+    // monitored-fence write, oversized-body capture, busy allocations,
+    // KMD authorship -- and executes it once, in resubmission order.  An
+    // unstamped command holds nothing a fresh one would not rebuild from
+    // the private data, so it is freed.  Nothing is executed or reported.
     void Discard();
+    // Free a command that never ran: drop its busy marks and any pinned
+    // monitored-fence mapping without performing the write.
+    void FreeUnrun();
+    // Free a command whose allocations may already be destroyed (its
+    // device is gone, or the adapter is stopping): like FreeUnrun, but its
+    // allocations are not touched.
+    void FreeOrphan();
 
     void PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand);
     void PrepareSubmitVirtual(const DXGKARG_SUBMITCOMMANDVIRTUAL *pSubmitCommand);
@@ -180,11 +192,12 @@ class VioGpuCommand final : public HandleBase<"VIOGCOMM"_M, VioGpuCommand>
     PUCHAR m_privBodyCopy;
     SIZE_T m_privBodySize;
 
-    // The packet's private data as seen at submit, kept only so Discard()
-    // can re-stamp this command into it.
-    void *m_pPriv;
-    ULONG m_PrivSize;
-    BOOLEAN m_PrivVirtual;
+    // Stamp-table membership (VioGpuCommander, under its stamp lock).
+    // m_Cookie stays set after Take so Discard can re-insert the command.
+    LIST_ENTRY m_StampEntry;
+    ULONGLONG m_Cookie;
+    VioGpuDevice *m_pStampDevice;
+    BOOLEAN m_Stamped;
 
     // Deferred monitored-fence write (see SetMFenceWrite).  Kva NULL = none;
     // Phys is the pin bookkeeping handle (MFenceMapUnpin).
@@ -226,6 +239,22 @@ class VioGpuCommander
     // without discarding.  Callable at DISPATCH (the completion DPC).
     void PreemptRelease(UINT dropThrough);
 
+    // Build -> submit hand-off.  A build-phase DDI registers its command and
+    // writes the returned cookie into the packet's private data; the submit
+    // DDI takes it back by cookie.  Cookies mix a monotonic counter with a
+    // per-boot secret, so user mode cannot name a stamped command it did not
+    // build.  pDevice binds the command to the submitting context (NULL for
+    // paging-buffer commands, whose context is VidMm's).
+    ULONGLONG Stamp(VioGpuCommand *cmd, VioGpuDevice *pDevice);
+    // Write a cookie for cmd into a packet's private-data slot, if it has one.
+    void StampInto(VioGpuCommand *cmd, VioGpuDevice *pDevice, void *priv, ULONG privSize);
+    void Restamp(VioGpuCommand *cmd);
+    void Unstamp(VioGpuCommand *cmd);
+    VioGpuCommand *Take(ULONGLONG cookie, VioGpuDevice *pDevice);
+    // Free commands that were stamped but never submitted: those bound to
+    // pDevice when it is destroyed, or every one (pDevice NULL) at Stop.
+    void FreeStamped(VioGpuDevice *pDevice);
+
   private:
     static void ThreadWork(PVOID Context);
     void ThreadWorkRoutine(void);
@@ -242,6 +271,11 @@ class VioGpuCommander
     KSPIN_LOCK m_Lock;
 
     UINT m_running;
+
+    KSPIN_LOCK m_StampLock;
+    LIST_ENTRY m_StampList;
+    volatile LONG64 m_StampCounter;
+    ULONGLONG m_StampSecret;
 
     // Under m_Lock.
     BOOLEAN m_PreemptHold;

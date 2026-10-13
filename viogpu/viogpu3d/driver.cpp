@@ -656,17 +656,23 @@ VioGpu3DBuildPagingBuffer(_In_ CONST HANDLE hAdapter, _In_ DXGKARG_BUILDPAGINGBU
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s operation=%d\n", __FUNCTION__, pBuildPagingBuffer->Operation));
 
-    // Paging DMA buffers are recycled with their private-data area, so a
-    // stale VioGpuCommand* from the buffer's previous user would reach
-    // SubmitCommand and corrupt an unrelated in-flight command's fence (see
-    // VioGpuDevice::Present).  Skip the clear for the one slot that already
-    // carries a stamp this driver placed: VidMm batches several operations
+    // Paging DMA buffers are recycled with their private-data area.  A cookie
+    // left by a buffer that was built but never submitted still names a live
+    // command, whose deferred fence write would land at this packet's
+    // completion with a stale value: reclaim it unrun.  Skip the slot that
+    // carries the current batch's stamp: VidMm batches several operations
     // into a single paging buffer, and the private data is handed back
     // unadvanced, so every operation in the batch addresses the same slot.
-    if (pBuildPagingBuffer->pDmaBufferPrivateData && pBuildPagingBuffer->DmaBufferPrivateDataSize >= sizeof(void *) &&
+    if (pBuildPagingBuffer->pDmaBufferPrivateData && pBuildPagingBuffer->DmaBufferPrivateDataSize >= sizeof(ULONGLONG) &&
         pBuildPagingBuffer->pDmaBufferPrivateData != pAdapter->m_PagingStampPriv)
     {
-        *(void **)pBuildPagingBuffer->pDmaBufferPrivateData = NULL;
+        ULONGLONG *slot = (ULONGLONG *)pBuildPagingBuffer->pDmaBufferPrivateData;
+        VioGpuCommand *stale = pAdapter->commander.Take(*slot, NULL);
+        if (stale != NULL)
+        {
+            stale->FreeUnrun();
+        }
+        *slot = 0;
     }
 
     switch (pBuildPagingBuffer->Operation)
@@ -844,7 +850,7 @@ VioGpu3DBuildPagingBuffer(_In_ CONST HANDLE hAdapter, _In_ DXGKARG_BUILDPAGINGBU
                 // visibility is the lesser evil against a lost signal, which
                 // strands whatever waits on the fence.
                 if (pBuildPagingBuffer->pDmaBufferPrivateData == NULL ||
-                    pBuildPagingBuffer->DmaBufferPrivateDataSize < sizeof(void *) || slotTaken)
+                    pBuildPagingBuffer->DmaBufferPrivateDataSize < sizeof(ULONGLONG) || slotTaken)
                 {
                     // No side-band to reach the submit phase.
                     DbgPrint(TRACE_LEVEL_WARNING,
@@ -869,18 +875,16 @@ VioGpu3DBuildPagingBuffer(_In_ CONST HANDLE hAdapter, _In_ DXGKARG_BUILDPAGINGBU
                 }
                 cmd->SetMFenceWrite(kva, phys, fenceVal);
                 // Stamp for BOTH submit paths: the non-virtual SubmitCommand
-                // reads the first pointer slot; SubmitCommandVirtual gates
-                // recovery on the mirror magic (empty body).
+                // reads the first slot; SubmitCommandVirtual gates recovery on
+                // the mirror magic (empty body).  NULL device: the packet runs
+                // on VidMm's paging context.
+                pAdapter->commander.StampInto(cmd, NULL, pBuildPagingBuffer->pDmaBufferPrivateData,
+                                              pBuildPagingBuffer->DmaBufferPrivateDataSize);
                 if (pBuildPagingBuffer->DmaBufferPrivateDataSize >= sizeof(VIOGPU_DMA_PRIVATE))
                 {
                     VIOGPU_DMA_PRIVATE *p = (VIOGPU_DMA_PRIVATE *)pBuildPagingBuffer->pDmaBufferPrivateData;
-                    p->cmdRaw = (ULONGLONG)(ULONG_PTR)cmd->ToHandle();
                     p->magic = VIOGPU_DMA_PRIV_MAGIC;
                     p->bodySize = 0;
-                }
-                else
-                {
-                    *(void **)pBuildPagingBuffer->pDmaBufferPrivateData = cmd->ToHandle();
                 }
                 pAdapter->m_PagingStampPriv = pBuildPagingBuffer->pDmaBufferPrivateData;
                 DbgPrint(TRACE_LEVEL_VERBOSE,
