@@ -645,7 +645,7 @@ end:
                 m_allocations[i]->UnmarkBusy();
             }
         }
-        delete m_allocations;
+        delete[] m_allocations;
     }
 
     // Retire the DXGK fence. For a command with outstanding async submissions
@@ -701,7 +701,7 @@ void VioGpuCommand::Discard()
                 m_allocations[i]->UnmarkBusy();
             }
         }
-        delete m_allocations;
+        delete[] m_allocations;
         m_allocations = NULL;
     }
     delete this;
