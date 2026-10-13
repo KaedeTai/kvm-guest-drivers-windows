@@ -25,11 +25,34 @@ NTKERNELAPI VOID KeStackAttachProcess(PEPROCESS Process, VIOGPU_KAPC_STATE *ApcS
 NTKERNELAPI VOID KeUnstackDetachProcess(VIOGPU_KAPC_STATE *ApcState);
 }
 
+void VioGpuAllocation::InitCommon(VioGpuAdapter *adapter)
+{
+    m_adapter = adapter;
+
+    m_pMDL = NULL;
+    m_pageCount = 0;
+    m_pageOffset = 0;
+    m_BackingAttached = FALSE;
+    m_DxPhysicalAddress = 0;
+
+    KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
+    m_busy = 0;
+    KeInitializeSpinLock(&m_busyLock);
+
+    ExInitializeFastMutex(&m_Lock);
+
+    m_refCount = 1;
+    m_deferReleaseItem = IoAllocateWorkItem(m_adapter->GetPhysicalDevice());
+    m_deferReleaseCount = 0;
+    m_deferReleaseQueued = 0;
+    KeInitializeDpc(&m_deferReleaseDpc, VioGpuAllocation::DeferredReleaseDpc, this);
+}
+
 VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_BLOB_OPTIONS *options, ULONGLONG size)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s BLOB\n", __FUNCTION__));
 
-    m_adapter = adapter;
+    InitCommon(adapter);
     // A residency-only blob names no host resource: minting a res_id would
     // burn the id space at one id per D3D12 resource and then unref an id the
     // host never created.  Born "Created" so Open() never issues
@@ -50,24 +73,6 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_BLOB_
     m_IsBlob = TRUE;
     m_Blob.Mapped = FALSE;
 
-    m_pMDL = NULL;
-    m_pageCount = 0;
-    m_pageOffset = 0;
-    m_BackingAttached = FALSE;
-    m_DxPhysicalAddress = 0;
-
-    KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
-    m_busy = 0;
-    KeInitializeSpinLock(&m_busyLock);
-
-    ExInitializeFastMutex(&m_Lock);
-
-    m_refCount = 1;
-    m_deferReleaseItem = IoAllocateWorkItem(m_adapter->GetPhysicalDevice());
-    m_deferReleaseCount = 0;
-    m_deferReleaseQueued = 0;
-    KeInitializeDpc(&m_deferReleaseDpc, VioGpuAllocation::DeferredReleaseDpc, this);
-
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d blob_id=%lld\n", __FUNCTION__, m_Id, m_Blob.Options.blob_id));
 }
 
@@ -75,7 +80,7 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_3D_OP
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s 3D\n", __FUNCTION__));
 
-    m_adapter = adapter;
+    InitCommon(adapter);
     m_Id = m_adapter->resourceIdr.GetId();
     m_IsImport = FALSE;
     m_IsPrimary = FALSE;
@@ -87,24 +92,6 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_3D_OP
     // m_adapter->ctrlQueue.CreateResource(m_Id, m_options.format, m_options.width, m_options.height);
     m_adapter->ctrlQueue.CreateResource3D(m_Id, options);
 
-    m_pMDL = NULL;
-    m_pageCount = 0;
-    m_pageOffset = 0;
-    m_BackingAttached = FALSE;
-    m_DxPhysicalAddress = 0;
-
-    KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
-    m_busy = 0;
-    KeInitializeSpinLock(&m_busyLock);
-
-    ExInitializeFastMutex(&m_Lock);
-
-    m_refCount = 1;
-    m_deferReleaseItem = IoAllocateWorkItem(m_adapter->GetPhysicalDevice());
-    m_deferReleaseCount = 0;
-    m_deferReleaseQueued = 0;
-    KeInitializeDpc(&m_deferReleaseDpc, VioGpuAllocation::DeferredReleaseDpc, this);
-
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d 3D\n", __FUNCTION__, m_Id));
 }
 
@@ -112,7 +99,7 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_IMPOR
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s IMPORT res_id=%d\n", __FUNCTION__, options->res_id));
 
-    m_adapter = adapter;
+    InitCommon(adapter);
     // Adopt the existing host res_id; do NOT mint one. The owning allocation
     // (another process's shared-texture blob) created the resource on its
     // context and owns the id's lifetime.
@@ -135,24 +122,6 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_IMPOR
     m_Size = size;
     m_IsBlob = TRUE;
 
-    m_pMDL = NULL;
-    m_pageCount = 0;
-    m_pageOffset = 0;
-    m_BackingAttached = FALSE;
-    m_DxPhysicalAddress = 0;
-
-    KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
-    m_busy = 0;
-    KeInitializeSpinLock(&m_busyLock);
-
-    ExInitializeFastMutex(&m_Lock);
-
-    m_refCount = 1;
-    m_deferReleaseItem = IoAllocateWorkItem(m_adapter->GetPhysicalDevice());
-    m_deferReleaseCount = 0;
-    m_deferReleaseQueued = 0;
-    KeInitializeDpc(&m_deferReleaseDpc, VioGpuAllocation::DeferredReleaseDpc, this);
-
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s IMPORT res_id=%d size=%lld\n", __FUNCTION__, m_Id, size));
 }
 
@@ -162,7 +131,7 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_SHARE
                                    options->blob_id, options->width, options->height,
                                    options->primary, options->modifier));
 
-    m_adapter = adapter;
+    InitCommon(adapter);
     // Blob-backed shared texture: mint the res_id now; the host binding
     // (RESOURCE_CREATE_BLOB on the UMD's transport context, which staged
     // the pending dmabuf export under blob_id) happens when the creating
@@ -187,24 +156,6 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_SHARE
     m_Blob.Created = FALSE;
     m_Blob.Mapped = FALSE;
     m_Size = size;
-
-    m_pMDL = NULL;
-    m_pageCount = 0;
-    m_pageOffset = 0;
-    m_BackingAttached = FALSE;
-    m_DxPhysicalAddress = 0;
-
-    KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
-    m_busy = 0;
-    KeInitializeSpinLock(&m_busyLock);
-
-    ExInitializeFastMutex(&m_Lock);
-
-    m_refCount = 1;
-    m_deferReleaseItem = IoAllocateWorkItem(m_adapter->GetPhysicalDevice());
-    m_deferReleaseCount = 0;
-    m_deferReleaseQueued = 0;
-    KeInitializeDpc(&m_deferReleaseDpc, VioGpuAllocation::DeferredReleaseDpc, this);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s SHARED res_id=%d blob_id=0x%llx size=%lld\n", __FUNCTION__,
                                    m_Id, options->blob_id, size));

@@ -265,6 +265,9 @@ class VioGpuAllocation final : public HandleBase<"VIOGALLO"_M, VioGpuAllocation>
     inline BOOLEAN MapBlobSyncLocked(VioGpuDevice *pDevice);
     inline BOOLEAN UnmapBlobLocked(UINT ctx_id, void (*complete_cb)(void *, void *, void *), void *complete_ctx);
 
+    // Type-independent construction shared by every constructor.
+    void InitCommon(VioGpuAdapter *adapter);
+
     static VOID NTAPI DeferredReleaseWorker(PDEVICE_OBJECT DeviceObject, PVOID Context);
     static VOID NTAPI DeferredReleaseDpc(_KDPC *Dpc, PVOID Context, PVOID Arg1, PVOID Arg2);
     void QueueDeferredReleaseWorkItem();
