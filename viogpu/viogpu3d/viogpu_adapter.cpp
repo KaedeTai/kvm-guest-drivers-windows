@@ -4009,7 +4009,7 @@ VOID VioGpuAdapter::ShmemFree(ULONGLONG offset, SIZE_T size)
     KeReleaseSpinLock(&m_PendingCreateLock, irql);
 }
 
-VioGpuAllocation *VioGpuAdapter::AllocationByResId(UINT resId)
+VioGpuAllocation *VioGpuAdapter::AllocationByResIdRef(UINT resId)
 {
     // Resolve through the open-time bindings (every UMD-visible blob is
     // opened on a device before it is mapped).
@@ -4019,7 +4019,10 @@ VioGpuAllocation *VioGpuAdapter::AllocationByResId(UINT resId)
     for (LIST_ENTRY *e = m_KmtMapList.Flink; e != &m_KmtMapList; e = e->Flink)
     {
         ALLOC_MAP_ENTRY *n = CONTAINING_RECORD(e, ALLOC_MAP_ENTRY, entry);
-        if (n->allocation != NULL && n->allocation->GetId() == resId)
+        // An IMPORT alias shares its owner's res_id but is never mappable;
+        // only the owner can be the target of a map or unmap.
+        if (n->allocation != NULL && n->allocation->GetId() == resId && n->allocation->IsMappable() &&
+            n->allocation->TryAddRef())
         {
             found = n->allocation;
             break;

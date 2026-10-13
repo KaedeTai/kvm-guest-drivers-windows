@@ -250,7 +250,7 @@ class VioGpuAdapter final : public HandleBase<"VIOGADAP"_M, VioGpuAdapter>, IVio
 
     // D3DKMT handle -> allocation bindings learned at DxgkDdiOpenAllocation,
     // the only place both are visible together.  The UMD's RES_INFO/RES_BUSY
-    // escapes resolve through this, as does AllocationByResId.
+    // escapes resolve through this, as does AllocationByResIdRef.
     VOID KmtMapInsert(D3DKMT_HANDLE handle, VioGpuAllocation *allocation);
     VOID KmtMapRemove(D3DKMT_HANDLE handle, VioGpuAllocation *allocation);
     VOID KmtMapRemoveByAllocation(VioGpuAllocation *allocation);
@@ -264,7 +264,8 @@ class VioGpuAdapter final : public HandleBase<"VIOGADAP"_M, VioGpuAdapter>, IVio
     VOID CookieMapRemoveByAllocation(VioGpuAllocation *allocation);
     VioGpuAllocation *CookieMapLookup(ULONGLONG cookie);
 
-    VioGpuAllocation *AllocationByResId(UINT resId);
+    // Returns a referenced allocation (caller Releases) or NULL.
+    VioGpuAllocation *AllocationByResIdRef(UINT resId);
 
     // KMD-owned shmem window suballocation, page granularity.  VidMm never
     // commits host-backed blobs into the shmem segment under GpuMmu, so the

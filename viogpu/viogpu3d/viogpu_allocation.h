@@ -64,6 +64,10 @@ class VioGpuAllocation final : public HandleBase<"VIOGALLO"_M, VioGpuAllocation>
     // DxgkDestroyAllocation; the matching Release runs after the pointer
     // is dropped. Object is deleted when the count reaches zero.
     void AddRef();
+    // AddRef only while the object is still live: lookup tables keep an entry
+    // until the destructor unlinks it, so a lookup can find an object whose
+    // last reference is already gone.
+    BOOLEAN TryAddRef();
     void Release();
 
     // Variant of Release safe at IRQL >= DISPATCH_LEVEL. ~VioGpuAllocation

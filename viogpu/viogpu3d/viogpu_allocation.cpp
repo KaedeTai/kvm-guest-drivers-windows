@@ -282,6 +282,22 @@ void VioGpuAllocation::AddRef()
     InterlockedIncrement(&m_refCount);
 }
 
+BOOLEAN VioGpuAllocation::TryAddRef()
+{
+    for (;;)
+    {
+        LONG count = m_refCount;
+        if (count <= 0)
+        {
+            return FALSE;
+        }
+        if (InterlockedCompareExchange(&m_refCount, count + 1, count) == count)
+        {
+            return TRUE;
+        }
+    }
+}
+
 void VioGpuAllocation::Release()
 {
     LONG newCount = InterlockedDecrement(&m_refCount);

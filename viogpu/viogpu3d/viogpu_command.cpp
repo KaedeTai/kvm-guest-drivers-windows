@@ -501,13 +501,25 @@ void VioGpuCommand::Run()
                         {
                             continue;
                         }
-                        VioGpuAllocation *allocation = m_pAdapter->AllocationByResId(res_ids[i]);
+                        VioGpuAllocation *allocation = m_pAdapter->AllocationByResIdRef(res_ids[i]);
                         if (allocation == NULL)
                         {
                             DbgPrint(TRACE_LEVEL_ERROR,
                                      ("<---> %s fence_id=%d %s unknown res_id=%d\n",
                                       __FUNCTION__, m_FenceId,
                                       mapping ? "MAP_BLOB_BY_ID" : "UNMAP_BLOB_BY_ID", res_ids[i]));
+                            continue;
+                        }
+                        // The res_id is unvalidated UMD payload and the binding
+                        // table spans every process: only a blob this device has
+                        // open may be mapped or unmapped, as for the RES_* escapes.
+                        if (!allocation->IsOpenOn(m_pDevice) || !allocation->IsMappable())
+                        {
+                            DbgPrint(TRACE_LEVEL_ERROR,
+                                     ("<---> %s fence_id=%d %s res_id=%d not a mappable blob open on this device\n",
+                                      __FUNCTION__, m_FenceId,
+                                      mapping ? "MAP_BLOB_BY_ID" : "UNMAP_BLOB_BY_ID", res_ids[i]));
+                            allocation->Release();
                             continue;
                         }
                         UINT ctxId = m_pDevice->m_Context.GetId();
@@ -523,6 +535,7 @@ void VioGpuCommand::Run()
                         {
                             DropPending();
                         }
+                        allocation->Release();
                     }
                     if (DropPending() == 0)
                     {
