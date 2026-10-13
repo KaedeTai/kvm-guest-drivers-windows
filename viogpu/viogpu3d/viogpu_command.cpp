@@ -678,7 +678,7 @@ void VioGpuCommand::Discard()
                   __FUNCTION__, m_FenceId));
         if (virt)
         {
-            ((VIOGPU_DMA_PRIVATE *)m_pPriv)->cmd = ToHandle();
+            ((VIOGPU_DMA_PRIVATE *)m_pPriv)->cmdRaw = (ULONGLONG)(ULONG_PTR)ToHandle();
         }
         else
         {
@@ -1179,13 +1179,13 @@ NTSTATUS VioGpuCommander::SubmitCommandVirtual(const DXGKARG_SUBMITCOMMANDVIRTUA
         VIOGPU_DMA_PRIVATE *priv = (VIOGPU_DMA_PRIVATE *)pSubmitCommand->pDmaBufferPrivateData;
         if (priv->magic == VIOGPU_DMA_PRIV_MAGIC)
         {
-            // priv->cmd is a pointer we stored (or NULL) -- FromHandle is
+            // priv->cmdRaw is a pointer we stored (or NULL) -- FromHandle is
             // safe on it.  Consume-once (see SubmitCommand): a
             // resubmission of the same DMA buffer must not resurrect the
             // same command object; the mirrored body stays in priv so a
             // fresh command still re-executes it.
-            cmd = VioGpuCommand::FromHandle(priv->cmd);
-            priv->cmd = NULL;
+            cmd = VioGpuCommand::FromHandle((void *)(ULONG_PTR)priv->cmdRaw);
+            priv->cmdRaw = 0;
             // See SubmitCommand: release the build-phase hold on this slot.
             InterlockedCompareExchangePointer(&m_pAdapter->m_PagingStampPriv,
                                               NULL,

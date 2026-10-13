@@ -222,6 +222,7 @@ typedef struct _VIOGPU_RES_INFO_REQ
     ULONGLONG LookupCookie;
 } VIOGPU_RES_INFO_REQ;
 #pragma pack()
+
 #pragma pack(1)
 // Occupancy of the hostmem-BAR shmem suballocator (the window behind
 // ShmemAlloc).  The BAR is a fixed segment with no VidMm eviction, so the
@@ -251,7 +252,6 @@ typedef struct _VIOGPU_RES_RELEASE_REQ
     ULONGLONG LookupCookie;
 } VIOGPU_RES_RELEASE_REQ;
 #pragma pack()
-
 
 #pragma pack(1)
 typedef struct _VIOGPU_RES_BUSY_REQ
@@ -363,6 +363,12 @@ typedef struct _VIOGPU_RESOURCE_3D_OPTIONS
 #define VIOGPU_BLOB_FLAG_USE_SHAREABLE    0x0002
 //#define VIOGPU_BLOB_FLAG_USE_CROSS_DEVICE 0x0004
 #define VIOGPU_BLOB_FLAG_PINNED           0x0008
+// Blob that exists only so its resource owns a kernel allocation: no res_id is
+// minted for it, RESOURCE_CREATE_BLOB is never issued, and neither is the
+// RESOURCE_UNREF at destroy.  ID3D12Device1::SetResidencyPriority is serviced
+// inside the D3D12 runtime, which rejects an object owning no allocation with
+// E_INVALIDARG without ever consulting the driver.
+#define VIOGPU_BLOB_FLAG_RESIDENCY_ONLY   0x0010
 #pragma pack(1)
 typedef struct _VIOGPU_RESOURCE_BLOB_OPTIONS
 {
@@ -519,6 +525,23 @@ struct _VIOGPU_BLIT_PRESENT
                                           // KMD for packet-gated flip presents
                                           // (VIOGPU_PRESENT_GATE_HINT); never reaches
                                           // virtio and never authored by the UMD
+
+// Per-submission DMA private data.  The KMD's build-phase DDIs and the D3D12
+// DDI's SubmitCommandCb (virtual contexts) both carry the command `body` by
+// value here: GPU VAs are not CPU-mappable.  `magic` identifies the layout,
+// not the author.
+#define VIOGPU_DMA_PRIV_MAGIC 0x56503244u /* 'VP2D' */
+#define VIOGPU_DMA_PRIV_BODY_MAX 1024u
+typedef struct _VIOGPU_DMA_PRIVATE
+{
+    ULONGLONG cmdRaw; /* KMD-owned slot, user mode leaves it 0.  Must stay
+                       * first (a paging buffer's private data may hold only
+                       * this slot); ULONGLONG keeps the layout identical
+                       * for a 32-bit UMD */
+    ULONG magic;
+    ULONG bodySize;
+    UCHAR body[VIOGPU_DMA_PRIV_BODY_MAX];
+} VIOGPU_DMA_PRIVATE;
 
 // #define VIOGPU_EXECBUF_FENCE_FD_IN  0x01
 // #define VIOGPU_EXECBUF_FENCE_FD_OUT 0x02

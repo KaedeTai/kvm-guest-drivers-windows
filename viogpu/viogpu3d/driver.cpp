@@ -874,7 +874,7 @@ VioGpu3DBuildPagingBuffer(_In_ CONST HANDLE hAdapter, _In_ DXGKARG_BUILDPAGINGBU
                 if (pBuildPagingBuffer->DmaBufferPrivateDataSize >= sizeof(VIOGPU_DMA_PRIVATE))
                 {
                     VIOGPU_DMA_PRIVATE *p = (VIOGPU_DMA_PRIVATE *)pBuildPagingBuffer->pDmaBufferPrivateData;
-                    p->cmd = cmd->ToHandle();
+                    p->cmdRaw = (ULONGLONG)(ULONG_PTR)cmd->ToHandle();
                     p->magic = VIOGPU_DMA_PRIV_MAGIC;
                     p->bodySize = 0;
                 }

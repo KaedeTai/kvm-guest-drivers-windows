@@ -1,6 +1,7 @@
 #pragma once
 
 #include "handle.h"
+#include "viogpum.h"
 
 #define VIOGPU_MAX_RUNNING 1
 
@@ -10,42 +11,21 @@ class VioGpuContext;
 class VioGpuAllocation;
 class VioGpuCommander;
 
-// DMA private-data layout.  Under GpuMmu the submit DDI only sees a GPU VA
-// for the DMA buffer, so the build-phase DDIs (Present/Render) mirror the
-// command body they wrote into the packet's private data, which dxgkrnl
-// carries to SubmitCommandVirtual by value.
-//
-// `magic` is the "WE own this private data" flag: SubmitCommandVirtual also
-// runs for dxgkrnl-originated paging packets whose private data is not ours
-// (stale bytes).  It must NOT interpret those bytes as a VioGpuCommand* --
-// HandleBase::FromHandle makes a virtual call through the candidate pointer,
-// so a garbage pointer wild-calls through a garbage vtable.  Only
-// Present/Render packets stamp magic, so a clear/mismatched magic means the
-// packet is not ours and completes fence-only.
-//
-// `cmd` is first because a paging buffer's private data can be as small as a
-// single pointer, and that slot alone is what the non-virtual submit path
-// reads.
-#define VIOGPU_DMA_PRIV_MAGIC 0x56503244u /* 'VP2D' */
-#define VIOGPU_DMA_PRIV_BODY_MAX 1024u
-typedef struct _VIOGPU_DMA_PRIVATE
-{
-    void *cmd; /* must stay first: see above */
-    ULONG magic;
-    ULONG bodySize; /* 0 = no body (flip); >MAX = oversized (fence-only) */
-    UCHAR body[VIOGPU_DMA_PRIV_BODY_MAX];
-} VIOGPU_DMA_PRIVATE;
+// DMA private data (VIOGPU_DMA_PRIVATE, viogpum.h).  SubmitCommandVirtual
+// also runs for dxgkrnl-originated paging packets whose private data is not
+// ours (stale bytes), so a clear/mismatched magic means the packet completes
+// fence-only.  Only Present/Render/paging-signal packets stamp the magic.
 
 // Claim the packet's private data as ours (Present/Render entry).  Private
 // data too small for the mirror still gets its command pointer cleared, so a
 // recycled buffer cannot hand a stale pointer to the submit path.
 inline void VioGpuDmaPrivClaim(void *priv, ULONG privSize)
 {
-    if (!priv || privSize < sizeof(void *))
+    if (!priv || privSize < sizeof(ULONGLONG))
     {
         return;
     }
-    *(void **)priv = NULL;
+    *(ULONGLONG *)priv = 0;
     if (privSize < sizeof(VIOGPU_DMA_PRIVATE))
     {
         return;

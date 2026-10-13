@@ -38,6 +38,17 @@
 #include "viogpudo.tmh"
 #endif
 
+// UMD<->KMD ABI (viogpum.h, mirrored in mesa's wddm_hw.h).  The sizes are the
+// same for 32- and 64-bit user mode; a change here is a protocol break.
+C_ASSERT(sizeof(VIOGPU_ADAPTERINFO) == 32);
+C_ASSERT(sizeof(VIOGPU_ESCAPE) == 108);
+C_ASSERT(sizeof(VIOGPU_RES_INFO_REQ) == 104);
+C_ASSERT(sizeof(VIOGPU_CREATE_ALLOCATION_EXCHANGE) == 204);
+C_ASSERT(sizeof(VIOGPU_CREATE_ALLOCATION_EXCHANGE_EX) == 212);
+C_ASSERT(sizeof(VIOGPU_BLIT_PRESENT) == 348);
+C_ASSERT(sizeof(VIOGPU_DMA_PRIVATE) == 1040);
+C_ASSERT(FIELD_OFFSET(VIOGPU_DMA_PRIVATE, cmdRaw) == 0);
+
 static UINT g_InstanceId = 0;
 
 // HWClose waits this many 1s rounds for the worker thread before giving up on
