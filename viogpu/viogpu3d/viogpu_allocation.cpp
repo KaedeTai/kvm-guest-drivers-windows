@@ -766,6 +766,10 @@ VOID VioGpuAllocation::CreateBlob(UINT ctx_id)
 
 BOOLEAN VioGpuAllocation::MapBlobLocked(UINT ctx_id, void (*complete_cb)(void *, void *, void *), void *complete_ctx)
 {
+    if (m_Id == 0)
+    {
+        return FALSE;
+    }
     if (!m_adapter->ctrlQueue.ResourceMapBlob(m_Id, ctx_id, m_Blob.MapOffset, complete_cb, complete_ctx))
     {
         // Nothing was queued, so complete_cb will never fire.  Leaving
@@ -783,6 +787,10 @@ BOOLEAN VioGpuAllocation::MapBlobLocked(UINT ctx_id, void (*complete_cb)(void *,
 // MapBlobLocked leaves that unknowable.
 BOOLEAN VioGpuAllocation::MapBlobSyncLocked(VioGpuDevice *pDevice)
 {
+    if (m_Id == 0)
+    {
+        return FALSE;
+    }
     UINT ctxId = 0;
     auto pEntry = Find(pDevice);
     if (pEntry != nullptr)

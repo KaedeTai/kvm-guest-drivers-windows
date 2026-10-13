@@ -1015,8 +1015,9 @@ VioGpuDeviceAllocation::VioGpuDeviceAllocation(VioGpuDevice *device, VioGpuAlloc
     // dmabuf into the opener's render worker (proxy attach-forwarding).
     // A device that never issued VIOGPU_CTX_INIT has no host context to
     // attach to (the UMD's transport-context import rig covers the open
-    // in that case); skip rather than name a nonexistent ctx.
-    if (!m_pDevice->m_Context.IsEmpty())
+    // in that case); skip rather than name a nonexistent ctx.  A
+    // residency-only blob (id 0) names no host resource.
+    if (!m_pDevice->m_Context.IsEmpty() && m_pAllocation->GetId() != 0)
     {
         m_pDevice->GetCtrlQueue()->CtxResource(true, m_pDevice->m_Context.GetId(), m_pAllocation->GetId());
         m_attached = true;
