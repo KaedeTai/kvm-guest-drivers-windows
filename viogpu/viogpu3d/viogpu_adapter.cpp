@@ -1682,51 +1682,6 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
 
                 break;
             }
-        case VIOGPU_BLIT_INIT:
-            {
-                size = sizeof(VIOGPU_BLIT_INIT_REQ);
-                if (pVioGpuEscape->DataLength < size)
-                {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
-                    return STATUS_INVALID_BUFFER_SIZE;
-                }
-                VioGpuDevice *pDevice = VioGpuDevice::FromHandle(pEscape->hDevice);
-                if (pDevice == NULL)
-                {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s no hDdevice(context) supplied\n", __FUNCTION__));
-                    return STATUS_INVALID_PARAMETER;
-                }
-
-                if (!NT_SUCCESS(ObReferenceObjectByHandle(VioGpuUmHandleValue(pVioGpuEscape->BlitInit.EventUM),
-                                                          SYNCHRONIZE | EVENT_MODIFY_STATE,
-                                                          *ExEventObjectType,
-                                                          UserMode,
-                                                          (void **)&pDevice->m_hUM,
-                                                          NULL)))
-                {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("---> %s: Unable to reference user-mode event object 0x%llx\n", __FUNCTION__, pVioGpuEscape->BlitInit.EventUM));
-                    return STATUS_INVALID_HANDLE;
-                }
-
-                if (!NT_SUCCESS(ObReferenceObjectByHandle(VioGpuUmHandleValue(pVioGpuEscape->BlitInit.EventKM),
-                                                          SYNCHRONIZE | EVENT_MODIFY_STATE,
-                                                          *ExEventObjectType,
-                                                          UserMode,
-                                                          (void **)&pDevice->m_hKM,
-                                                          NULL)))
-                {
-                    ObDereferenceObject(pDevice->m_hUM);
-                    DbgPrint(TRACE_LEVEL_ERROR, ("---> %s: Unable to reference user-mode event object 0x%llx\n", __FUNCTION__, pVioGpuEscape->BlitInit.EventKM));
-                    return STATUS_INVALID_HANDLE;
-                }
-
-                pDevice->m_pBlit = VIOGPU_UM_PTR_AS(PVIOGPU_BLIT_PRESENT, pVioGpuEscape->BlitInit.pBlitPresent);
-                break;
-            }
         case VIOGPU_SUBMIT_PRESENT_FENCE:
             {
                 size = sizeof(VIOGPU_PRESENT_FENCE_REQ);

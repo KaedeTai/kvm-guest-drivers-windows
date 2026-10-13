@@ -53,16 +53,11 @@ class VioGpuDevice final : public HandleBase<"VIOGDEVI"_M, VioGpuDevice>
     VioGpuDevice(VioGpuAdapter *pAdapter);
     ~VioGpuDevice();
 
-    inline BOOLEAN CanBlit() const {
-        return m_pBlit != nullptr;
-    }
-
     //NTSTATUS Init(VIOGPU_CTX_INIT_REQ *pOptions);
 
     NTSTATUS OpenAllocation(_In_ CONST DXGKARG_OPENALLOCATION *pOpenAllocation);
 
     NTSTATUS GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuDeviceAllocation *src, VioGpuDeviceAllocation *dst);
-    NTSTATUS GenerateBltPresentUM(DXGKARG_PRESENT *pPresent, VioGpuAllocation *src, VioGpuAllocation *dst);
     NTSTATUS Present(_Inout_ DXGKARG_PRESENT *pPresent);
     NTSTATUS Render(DXGKARG_RENDER *pRender);
 
@@ -71,8 +66,6 @@ class VioGpuDevice final : public HandleBase<"VIOGDEVI"_M, VioGpuDevice>
     VioGpuContext m_Context;
     VioGpuContext m_Virgl;
 
-    PRKEVENT m_hUM, m_hKM;
-    volatile PVIOGPU_BLIT_PRESENT m_pBlit;
   protected:
     VioGpuAdapter *m_pAdapter;
 };

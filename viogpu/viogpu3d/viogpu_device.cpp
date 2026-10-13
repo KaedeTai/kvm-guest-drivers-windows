@@ -64,10 +64,6 @@ VioGpuDevice::VioGpuDevice(VioGpuAdapter *pAdapter) : m_Context(pAdapter), m_Vir
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s\n", __FUNCTION__));
 
-    m_hUM = NULL;
-    m_hKM = NULL;
-    m_pBlit = NULL;
-
     m_pAdapter = pAdapter;
 }
 
@@ -75,9 +71,6 @@ VioGpuDevice::~VioGpuDevice()
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s", __FUNCTION__));
-
-    if (m_hUM) ObDereferenceObject(m_hUM);
-    if (m_hKM) ObDereferenceObject(m_hKM);
 }
 
 NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuDeviceAllocation *srcDev, VioGpuDeviceAllocation *dstDev)
@@ -344,167 +337,6 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuDevic
     return STATUS_SUCCESS;
 }
 
-NTSTATUS VioGpuDevice::GenerateBltPresentUM(DXGKARG_PRESENT *pPresent, VioGpuAllocation *src, VioGpuAllocation *dst)
-{
-    UNREFERENCED_PARAMETER(src);
-
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s\n", __FUNCTION__));
-
-    if (!CanBlit()) {
-        DbgPrint(TRACE_LEVEL_FATAL, ("<--> %s Invoke VIOGPU_BLIT_INIT escape first\n", __FUNCTION__));
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    VIOGPU_BLIT_PRESENT blit;
-
-    __try
-    {
-        ProbeForRead(m_pBlit, sizeof(blit), sizeof(ULONG));
-        RtlCopyMemory(&blit, m_pBlit, sizeof(blit));
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        DbgPrint(TRACE_LEVEL_FATAL, ("---> %s: Failed to copy from user\n", __FUNCTION__));
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    // Calculate rect covering all SubRectx
-    RECT coverRect = pPresent->pDstSubRects[0];
-    for (UINT i = 1; i < pPresent->SubRectCnt; i++)
-    {
-        coverRect.top = min(coverRect.top, pPresent->pDstSubRects[i].top);
-        coverRect.left = min(coverRect.left, pPresent->pDstSubRects[i].left);
-        coverRect.right = max(coverRect.right, pPresent->pDstSubRects[i].right);
-        coverRect.bottom = max(coverRect.bottom, pPresent->pDstSubRects[i].bottom);
-    }
-
-    if (dst->IsBlob()) {
-        blit.dst.alloc.Type = VIOGPU_RESOURCE_TYPE_BLOB;
-        blit.dst.alloc.OptionsBlob = dst->m_Blob.Options;
-        blit.dst.alloc.Size = dst->m_Size;
-    } else {
-        blit.dst.alloc.Type = VIOGPU_RESOURCE_TYPE_3D;
-        blit.dst.alloc.Options3D = dst->m_3dOptions;
-        blit.dst.alloc.Size = dst->m_Size;
-    }
-    // Descriptor only: the blit reads the host resource directly, so this path
-    // must not establish a BAR mapping the UMD never asked for.
-    dst->EscapeResourceInfo(&blit.dst.res_info, NULL);
-
-    INT dx = pPresent->SrcRect.left - pPresent->DstRect.left;
-    INT dy = pPresent->SrcRect.top - pPresent->DstRect.top;
-
-    for (UINT i = 0; i < pPresent->SubRectCnt; i++)
-    {
-        KeClearEvent(m_hKM);
-        KeClearEvent(m_hUM);
-
-        RECT rect = pPresent->pDstSubRects[i];
-
-        blit.src.rect.left = rect.left + dx;
-        blit.src.rect.right = rect.right + dx;
-        blit.src.rect.top = rect.top + dy;
-        blit.src.rect.bottom = rect.bottom + dy;
-        blit.dst.rect = rect;
-
-        DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("---> %s: DstRect = {.left = %ld, .top = %ld, .right = %ld, .bottom = %ld}\n",
-                  __FUNCTION__,
-                  blit.dst.rect.left,
-                  blit.dst.rect.top,
-                  blit.dst.rect.right,
-                  blit.dst.rect.bottom));
-
-        DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("---> %s: SrcRect = {.left = %ld, .top = %ld, .right = %ld, .bottom = %ld}, dx = %d, dy = %d\n",
-                  __FUNCTION__,
-                  blit.src.rect.left,
-                  blit.src.rect.top,
-                  blit.src.rect.right,
-                  blit.src.rect.bottom,
-                  dx, dy));
-
-        __try
-        {
-            ProbeForWrite(m_pBlit, sizeof(blit), sizeof(ULONG));
-            RtlCopyMemory(m_pBlit, &blit, sizeof(blit));
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            DbgPrint(TRACE_LEVEL_FATAL, ("---> %s: Failed to copy to user\n", __FUNCTION__));
-            return STATUS_INVALID_PARAMETER;
-        }
-
-        /* Blit information set up complete */
-        KeSetEvent(m_hUM, IO_NO_INCREMENT, FALSE);
-        DbgPrint(TRACE_LEVEL_ERROR, ("---> %s: waiting for blit from userspace %p / %p\n", __FUNCTION__, m_hUM, m_hKM));
-
-        LARGE_INTEGER timeout = {0};
-        timeout.QuadPart = Int32x32To64(10000, -10000);
-        /* Waiting for userspace to perform blit */
-        if (!NT_SUCCESS(KeWaitForSingleObject(m_hKM, Executive, KernelMode, FALSE, &timeout))) {
-            DbgPrint(TRACE_LEVEL_FATAL, ("---> %s: TIMEOUT waiting for blit from userspace\n", __FUNCTION__));
-            break;
-        }
-        /* Blit done */
-    }
-
-    KeClearEvent(m_hUM);
-    KeClearEvent(m_hKM);
-
-    if (dst->IsCoherent())
-    {
-        ULONG transferStride;
-        ULONGLONG transferOffset;
-        if (!dst->GetTransferLayout(coverRect.left, coverRect.top, &transferStride, &transferOffset))
-        {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("<--> %s invalid destination transfer layout res_id=%d x=%ld y=%ld\n",
-                      __FUNCTION__, dst->GetId(), coverRect.left, coverRect.top));
-            return STATUS_INVALID_PARAMETER;
-        }
-
-        UCHAR *dmaBuf = (UCHAR *)pPresent->pDmaBuffer;
-
-        VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)dmaBuf;
-        cmd_hdr->type = VIOGPU_CMD_TRANSFER_FROM_HOST;
-        cmd_hdr->size = sizeof(VIOGPU_TRANSFER_CMD);
-        cmd_hdr->flags = 0;
-        cmd_hdr->ring_idx = 0;
-        dmaBuf += sizeof(VIOGPU_COMMAND_HDR);
-
-        VIOGPU_TRANSFER_CMD *cmdBody = (VIOGPU_TRANSFER_CMD *)dmaBuf;
-        dmaBuf += sizeof(VIOGPU_TRANSFER_CMD);
-
-        cmdBody->res_id = dst->GetId();
-
-        cmdBody->box.x = coverRect.left;
-        cmdBody->box.y = coverRect.top;
-        cmdBody->box.z = 0;
-        cmdBody->box.width = coverRect.right - coverRect.left;
-        cmdBody->box.height = coverRect.bottom - coverRect.top;
-        cmdBody->box.depth = 1;
-
-        cmdBody->layer_stride = 0;
-        cmdBody->stride = transferStride;
-        cmdBody->level = 0;
-        cmdBody->offset = transferOffset;
-
-        pPresent->pDmaBuffer = dmaBuf;
-    }
-    else
-    {
-        VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)pPresent->pDmaBuffer;
-        cmd_hdr->type = VIOGPU_CMD_NOP;
-        cmd_hdr->size = 0;
-        cmd_hdr->flags = 0;
-        cmd_hdr->ring_idx = 0;
-        pPresent->pDmaBuffer = (char *)pPresent->pDmaBuffer + sizeof(VIOGPU_COMMAND_HDR);
-    }
-
-    return STATUS_SUCCESS;
-}
-
 NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 {
     PAGED_CODE();
@@ -727,11 +559,7 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
         if (pPresent->pDmaBuffer && dst && src)
         {
             char *bodyStart = (char *)pPresent->pDmaBuffer;
-            if (true /*m_Context.IsVirgl()*/) {
-                GenerateBltPresent(pPresent, src, dst);
-            } else {
-                GenerateBltPresentUM(pPresent, src->GetAllocation(), dst->GetAllocation());
-            }
+            GenerateBltPresent(pPresent, src, dst);
             // Carry the just-built body to SubmitCommandVirtual by
             // value (the submit DDI only sees a GPU VA in the virtual model).
             cmd->MirrorBody(pPresent->pDmaBufferPrivateData,
