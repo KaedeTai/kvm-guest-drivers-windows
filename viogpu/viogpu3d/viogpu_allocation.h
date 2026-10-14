@@ -134,11 +134,6 @@ class VioGpuAllocation final : public HandleBase<"VIOGALLO"_M, VioGpuAllocation>
         return m_KmdShmem.Placed;
     }
 
-    inline BOOL IsPinned() const
-    {
-        return m_IsBlob && (m_Blob.Options.blob_flags & VIOGPU_BLOB_FLAG_PINNED) != 0;
-    }
-
     inline BOOL IsMapped() const
     {
         return m_IsBlob && m_Blob.Created && m_Blob.Mapped;
