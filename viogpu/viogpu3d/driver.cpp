@@ -1253,9 +1253,10 @@ VioGpu3DDestroyProcess(_In_ CONST HANDLE hAdapter, _In_ CONST HANDLE hKmdProcess
 }
 
 // DxgkDdiSubmitCommandVirtual is the GpuMmu replacement for
-// DxgkDdiSubmitCommand and runs on the same DISPATCH_LEVEL scheduler path, so
-// it must not be pageable.  Its callees -- VioGpuCommander::SubmitCommandVirtual
-// and PrepareSubmitVirtual -- are already outside the PAGE section.
+// DxgkDdiSubmitCommand.  Unlike it, it is called at PASSIVE_LEVEL
+// (d3dkmddi.h), so it does not need to be resident; it stays outside the PAGE
+// section with its callees, VioGpuCommander::SubmitCommandVirtual and
+// PrepareSubmitVirtual.
 #pragma code_seg(push)
 #pragma code_seg()
 NTSTATUS
