@@ -1498,15 +1498,8 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 // (GetHandleData returns NULL and KMT-map entries go stale),
                 // which resolves one process's RES_INFO onto a different
                 // allocation and adopts its res_id.
-                VioGpuAllocation *allocation = NULL;
-                if (pVioGpuEscape->ResourceInfo.LookupCookie != 0)
-                {
-                    allocation = CookieMapLookup(pVioGpuEscape->ResourceInfo.LookupCookie);
-                }
-                if (allocation == NULL)
-                {
-                    allocation = AllocationFromHandle(pVioGpuEscape->ResourceInfo.ResHandle);
-                }
+                VioGpuAllocation *allocation = EscapeAllocationRef(pVioGpuEscape->ResourceInfo.LookupCookie,
+                                                                   pVioGpuEscape->ResourceInfo.ResHandle);
                 if (allocation == NULL)
                 {
                     DbgPrint(TRACE_LEVEL_ERROR, ("%s RES_INFO invalid handle %x\n", __FUNCTION__,
@@ -1527,11 +1520,12 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                     DbgPrint(TRACE_LEVEL_ERROR,
                              ("%s RES_INFO res_id=%d not open on device %p\n",
                               __FUNCTION__, allocation->GetId(), pResDevice));
+                    allocation->Release();
                     return STATUS_ACCESS_DENIED;
                 }
 
                 status = allocation->EscapeResourceInfo(&pVioGpuEscape->ResourceInfo, pResDevice);
-
+                allocation->Release();
                 break;
             }
         case VIOGPU_SHMEM_INFO:
@@ -1568,15 +1562,8 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 // Cookie-first resolution and the open-on-device check,
                 // exactly as RES_INFO: this escape tears down the caller's
                 // mapping of the blob's BAR window.
-                VioGpuAllocation *allocation = NULL;
-                if (pVioGpuEscape->ResRelease.LookupCookie != 0)
-                {
-                    allocation = CookieMapLookup(pVioGpuEscape->ResRelease.LookupCookie);
-                }
-                if (allocation == NULL)
-                {
-                    allocation = AllocationFromHandle(pVioGpuEscape->ResRelease.ResHandle);
-                }
+                VioGpuAllocation *allocation = EscapeAllocationRef(pVioGpuEscape->ResRelease.LookupCookie,
+                                                                   pVioGpuEscape->ResRelease.ResHandle);
                 if (allocation == NULL)
                 {
                     DbgPrint(TRACE_LEVEL_ERROR, ("%s RES_RELEASE invalid handle %x\n", __FUNCTION__,
@@ -1589,9 +1576,11 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                     DbgPrint(TRACE_LEVEL_ERROR,
                              ("%s RES_RELEASE res_id=%d not open on device %p\n",
                               __FUNCTION__, allocation->GetId(), pRelDevice));
+                    allocation->Release();
                     return STATUS_ACCESS_DENIED;
                 }
                 status = allocation->EscapeReleaseWindow(pRelDevice);
+                allocation->Release();
                 break;
             }
         case VIOGPU_CTX_INIT:
@@ -3980,6 +3969,45 @@ VioGpuAllocation *VioGpuAdapter::AllocationFromHandle(D3DKMT_HANDLE handle)
         }
     }
     return allocation;
+}
+
+VioGpuAllocation *VioGpuAdapter::EscapeAllocationRef(ULONGLONG cookie, D3DKMT_HANDLE handle)
+{
+    VioGpuAllocation *found = NULL;
+    KIRQL irql;
+    if (cookie != 0)
+    {
+        KeAcquireSpinLock(&m_PendingCreateLock, &irql);
+        ALLOC_MAP_ENTRY *n = AllocMapFind(&m_CookieMapList, cookie);
+        if (n != NULL && n->allocation != NULL && n->allocation->TryAddRef())
+        {
+            found = n->allocation;
+        }
+        KeReleaseSpinLock(&m_PendingCreateLock, irql);
+        if (found != NULL)
+        {
+            return found;
+        }
+    }
+
+    DXGKARGCB_GETHANDLEDATA getHandleData;
+    getHandleData.hObject = handle;
+    getHandleData.Type = DXGK_HANDLE_ALLOCATION;
+    getHandleData.Flags.DeviceSpecific = 0;
+    found = VioGpuAllocation::FromHandle(m_DxgkInterface.DxgkCbGetHandleData(&getHandleData));
+    if (found != NULL)
+    {
+        return found->TryAddRef() ? found : NULL;
+    }
+
+    KeAcquireSpinLock(&m_PendingCreateLock, &irql);
+    ALLOC_MAP_ENTRY *n = AllocMapFind(&m_KmtMapList, handle);
+    if (n != NULL && n->allocation != NULL && n->allocation->TryAddRef())
+    {
+        found = n->allocation;
+    }
+    KeReleaseSpinLock(&m_PendingCreateLock, irql);
+    return found;
 }
 
 VioGpuResource *VioGpuAdapter::ResourceFromHandle(D3DKMT_HANDLE handle)

@@ -267,6 +267,10 @@ class VioGpuAdapter final : public HandleBase<"VIOGADAP"_M, VioGpuAdapter>, IVio
 
     // Returns a referenced allocation (caller Releases) or NULL.
     VioGpuAllocation *AllocationByResIdRef(UINT resId);
+    // Resolves an escape's lookup cookie, then its D3DKMT handle, to a
+    // referenced allocation (caller Releases) or NULL.  Escape payloads are
+    // unvalidated and can race another process destroying the allocation.
+    VioGpuAllocation *EscapeAllocationRef(ULONGLONG cookie, D3DKMT_HANDLE handle);
 
     // KMD-owned shmem window suballocation, page granularity.  VidMm never
     // commits host-backed blobs into the shmem segment under GpuMmu, so the
