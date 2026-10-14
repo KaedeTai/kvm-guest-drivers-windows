@@ -556,6 +556,12 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
                             bodyStart,
                             (char *)pPresent->pDmaBuffer - bodyStart);
         }
+        // Without a DMA buffer the command was never stamped, so no submit
+        // will claim it.
+        if (!pPresent->pDmaBuffer)
+        {
+            cmd->FreeUnrun();
+        }
         return STATUS_SUCCESS;
     }
 
@@ -566,8 +572,7 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
     DbgPrint(TRACE_LEVEL_INFORMATION,
              ("%s unsupported Present flags=0x%x\n", __FUNCTION__,
               pPresent->Flags.Value));
-    m_pAdapter->commander.Unstamp(cmd);
-    delete cmd;
+    cmd->FreeUnrun();
     return STATUS_NOT_SUPPORTED;
 }
 
