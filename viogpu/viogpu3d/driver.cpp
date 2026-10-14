@@ -752,15 +752,9 @@ VioGpu3DBuildPagingBuffer(_In_ CONST HANDLE hAdapter, _In_ DXGKARG_BUILDPAGINGBU
                                                allocation->IsBlob()));
 
                 // VidMm is freeing this allocation's segment range for reuse.
-                // A mappable blob's HOST mapping ideally dies with it (dead
-                // processes never send their UMD-side unmap), but no
-                // UNMAP_BLOB is emitted from the paging DMA: QEMU's unmap
-                // completion is asynchronous (RCU-deferred region teardown)
-                // and under process churn a suspended unmap parks the paging
-                // fence past dxgkrnl's TDR budget (a ResetFromTimeout within
-                // seconds of DISCARD bursts).  The stale-window concern is
-                // better fixed host-side by making RES_UNREF drop any live
-                // mapping when the blob is destroyed.
+                // No UNMAP_BLOB is emitted from the paging DMA: a host mapping
+                // that outlives its UMD-side unmap (a dead process) is torn
+                // down by the RESOURCE_UNREF when the allocation is destroyed.
 
                 return STATUS_SUCCESS;
             }

@@ -442,15 +442,12 @@ VioGpuAllocation::~VioGpuAllocation(void)
 
     if (m_IsBlob && m_Blob.Mapped)
     {
-        // Orphaned mapping (process died without the UMD unmap).  Do NOT
-        // send UNMAP_BLOB here: back-to-back unmap+destroy hits the QEMU
-        // async-unmap/destroy race and wedges its main loop (cmdq suspended
-        // forever on the unmap).  The DISCARD_CONTENT paging op
-        // (BuildPagingBuffer) performs the ordered host unmap when VidMm
-        // actually frees the range; the destroy below is safe because the
-        // host keeps blob memory alive until RES_UNREF.
+        // Orphaned mapping (process died without the UMD unmap).  No
+        // UNMAP_BLOB is needed: the host tears the mapping down with the
+        // resource on the RESOURCE_UNREF below, deferring the unref until
+        // the mapping is gone.
         DbgPrint(TRACE_LEVEL_WARNING,
-                 ("---> %s res_id=%d still-mapped blob at destroy (host unmap deferred to DISCARD)\n",
+                 ("---> %s res_id=%d still-mapped blob at destroy (host unmaps at unref)\n",
                   __FUNCTION__, m_Id));
         m_Blob.Mapped = FALSE;
     }
