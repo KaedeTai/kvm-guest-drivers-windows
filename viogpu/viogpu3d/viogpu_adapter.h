@@ -250,7 +250,7 @@ class VioGpuAdapter final : public HandleBase<"VIOGADAP"_M, VioGpuAdapter>, IVio
     VOID PendingCreateRemove(VioGpuAllocation *allocation);
 
     // D3DKMT handle -> allocation bindings learned at DxgkDdiOpenAllocation,
-    // the only place both are visible together.  The UMD's RES_INFO/RES_BUSY
+    // the only place both are visible together.  The UMD's RES_INFO/RES_RELEASE
     // escapes resolve through this, as does AllocationByResIdRef.
     VOID KmtMapInsert(D3DKMT_HANDLE handle, VioGpuAllocation *allocation);
     VOID KmtMapRemove(D3DKMT_HANDLE handle, VioGpuAllocation *allocation);

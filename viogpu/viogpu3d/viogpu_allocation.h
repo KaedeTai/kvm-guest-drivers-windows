@@ -83,9 +83,6 @@ class VioGpuAllocation final : public HandleBase<"VIOGALLO"_M, VioGpuAllocation>
         return m_Id;
     }
 
-    void MarkBusy();
-    void UnmarkBusy();
-
     void SetDxPhysicalAddress(size_t DxPhysicalAddress)
     {
         m_DxPhysicalAddress = DxPhysicalAddress;
@@ -191,7 +188,6 @@ class VioGpuAllocation final : public HandleBase<"VIOGALLO"_M, VioGpuAllocation>
     // reads the descriptor and must not establish a mapping of its own.
     NTSTATUS EscapeResourceInfo(VIOGPU_RES_INFO_REQ *resInfo, VioGpuDevice *pMapDevice);
     NTSTATUS EscapeReleaseWindow(VioGpuDevice *pDevice);
-    NTSTATUS EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy);
 
     VOID CreateBlob(UINT ctx_id);
     // Return TRUE if a host map/unmap command was actually issued (so
@@ -321,10 +317,6 @@ class VioGpuAllocation final : public HandleBase<"VIOGALLO"_M, VioGpuAllocation>
     size_t m_GpummuFilled = 0;
 
     size_t m_DxPhysicalAddress;
-
-    KEVENT m_busyNotification;
-    volatile LONG m_busy;
-    KSPIN_LOCK m_busyLock;
 
     volatile LONG m_refCount;
 

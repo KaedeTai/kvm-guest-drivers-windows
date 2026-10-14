@@ -35,10 +35,6 @@ void VioGpuAllocation::InitCommon(VioGpuAdapter *adapter)
     m_BackingAttached = FALSE;
     m_DxPhysicalAddress = 0;
 
-    KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
-    m_busy = 0;
-    KeInitializeSpinLock(&m_busyLock);
-
     ExInitializeFastMutex(&m_Lock);
 
     m_refCount = 1;
@@ -816,52 +812,6 @@ VioGpuAllocationLockGuard::VioGpuAllocationLockGuard(VioGpuAllocation *allocatio
 VioGpuAllocationLockGuard::~VioGpuAllocationLockGuard()
 {
     m_Allocation->Unlock();
-}
-
-// NONPAGED: called from VioGpuCommand::Run / AttachAllocations on the
-// commander thread at DISPATCH_LEVEL (spinlocks held). Living in the
-// PAGE segment bugchecks 0xD1 (instruction-fetch of paged-out code at
-// IRQL 2) when UnmarkBusy is reached from Run.
-void VioGpuAllocation::MarkBusy()
-{
-    // Serialize counter + event mutation under m_busyLock. Without it,
-    // an interleaving where UnmarkBusy decrements to 0 and SetEvent's,
-    // then MarkBusy increments and ClearEvent's, would leave the
-    // counter > 0 with the event signalled -- causing EscapeResourceBusy
-    // to busy-spin waking immediately on every check.
-    KIRQL oldIrql;
-    KeAcquireSpinLock(&m_busyLock, &oldIrql);
-    InterlockedIncrement(&m_busy);
-    KeClearEvent(&m_busyNotification);
-    KeReleaseSpinLock(&m_busyLock, oldIrql);
-}
-
-void VioGpuAllocation::UnmarkBusy()
-{
-    KIRQL oldIrql;
-    KeAcquireSpinLock(&m_busyLock, &oldIrql);
-    LONG remaining = InterlockedDecrement(&m_busy);
-    if (remaining < 0)
-    {
-        // Underflow: more UnmarkBusy than MarkBusy. Clamp back to 0
-        // and signal so a waiter doesn't see a permanently-negative
-        // counter. DBG trips the assert below.
-        InterlockedExchange(&m_busy, 0);
-        KeSetEvent(&m_busyNotification, IO_NO_INCREMENT, FALSE);
-    }
-    else if (remaining == 0)
-    {
-        KeSetEvent(&m_busyNotification, IO_NO_INCREMENT, FALSE);
-    }
-    KeReleaseSpinLock(&m_busyLock, oldIrql);
-
-    if (remaining < 0)
-    {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s busy underflow res_id=%d remaining=%d\n",
-                  __FUNCTION__, m_Id, remaining));
-    }
-    ASSERT(remaining >= 0);
 }
 
 PAGED_CODE_SEG_BEGIN
@@ -1725,45 +1675,6 @@ NTSTATUS VioGpuAllocation::EscapeReleaseWindow(VioGpuDevice *pDevice)
 
     m_adapter->ShmemFree(m_Blob.MapOffset, m_KmdShmem.MapSize);
     m_KmdShmem.Placed = FALSE;
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS VioGpuAllocation::EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy)
-{
-    PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=%d\n", __FUNCTION__, m_Id));
-
-    // The busy count only drops when the host worker answers the in-flight
-    // command and the vbuf callback runs UnmarkBusy, so an untimed wait
-    // would strand this thread on a dead host until adapter teardown.  Wait
-    // in 1 s rounds up to 10 s, bail early once the adapter stops, and
-    // report a status the UMD can treat as device-lost.
-    ULONG rounds = 0;
-    while (resBusy->Wait && m_busy != 0)
-    {
-        if (!m_adapter->IsDriverActive())
-        {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("%s res_id=%d abandoned: adapter stopped\n", __FUNCTION__, m_Id));
-            resBusy->IsBusy = TRUE;
-            return STATUS_DEVICE_REMOVED;
-        }
-        LARGE_INTEGER timeout;
-        timeout.QuadPart = -10LL * 1000 * 1000; // 1 s, relative
-        NTSTATUS waitStatus = KeWaitForSingleObject(&m_busyNotification, UserRequest, KernelMode, FALSE, &timeout);
-        if (waitStatus == STATUS_TIMEOUT && ++rounds >= 10)
-        {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("%s res_id=%d still busy after %u s -- host worker dead? "
-                      "returning DEVICE_HUNG\n",
-                      __FUNCTION__, m_Id, rounds));
-            resBusy->IsBusy = TRUE;
-            return STATUS_DEVICE_HUNG;
-        }
-    }
-
-    resBusy->IsBusy = m_busy != 0;
-
     return STATUS_SUCCESS;
 }
 

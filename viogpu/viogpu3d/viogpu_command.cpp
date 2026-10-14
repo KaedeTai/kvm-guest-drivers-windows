@@ -638,17 +638,7 @@ void VioGpuCommand::Run()
 end:
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s finished fence_id=%d, this=%p, m_pAdapter=%p\n", __FUNCTION__, m_FenceId, this, m_pAdapter));
 
-    if (m_allocations)
-    {
-        for (UINT i = 0; i < m_allocationsLength; i++)
-        {
-            if (m_allocations[i])
-            {
-                m_allocations[i]->UnmarkBusy();
-            }
-        }
-        delete[] m_allocations;
-    }
+    delete[] m_allocations;
 
     // Retire the DXGK fence. For a command with outstanding async submissions
     // (the render hot path) this already fired from the response DPC via
@@ -695,30 +685,6 @@ void VioGpuCommand::FreeUnrun()
         m_pAdapter->MFenceMapUnpin(m_MFencePhys);
         m_MFenceKva = NULL;
     }
-    if (m_allocations)
-    {
-        for (UINT i = 0; i < m_allocationsLength; i++)
-        {
-            if (m_allocations[i])
-            {
-                m_allocations[i]->UnmarkBusy();
-            }
-        }
-        delete[] m_allocations;
-        m_allocations = NULL;
-    }
-    delete this;
-}
-
-void VioGpuCommand::FreeOrphan()
-{
-    PAGED_CODE();
-
-    if (m_MFenceKva != NULL)
-    {
-        m_pAdapter->MFenceMapUnpin(m_MFencePhys);
-        m_MFenceKva = NULL;
-    }
     delete[] m_allocations;
     m_allocations = NULL;
     delete this;
@@ -743,7 +709,6 @@ template <typename T> NTSTATUS VioGpuCommand::AttachAllocations(T *allocations, 
         if (deviceAllocation)
         {
             m_allocations[i] = deviceAllocation->GetAllocation();
-            m_allocations[i]->MarkBusy();
         }
         else
         {
@@ -819,7 +784,7 @@ void VioGpuCommand::QueueRunningCb(void *cmd, void *, void *)
         // be dropped by dxgkrnl's interrupt buffer under sustained render load,
         // losing the last fence of a workload so the scheduler TDRs an idle
         // engine (submitted==completed). The worker still re-enters Run() to do
-        // the paged cleanup (UnmarkBusy / delete); its NotifyCompletion() is a
+        // the paged cleanup (delete); its NotifyCompletion() is a
         // guarded no-op.
         if (self->m_pCommand >= self->m_pEnd)
         {
@@ -1341,7 +1306,7 @@ void VioGpuCommander::FreeStamped(VioGpuDevice *pDevice)
         {
             break;
         }
-        cmd->FreeOrphan();
+        cmd->FreeUnrun();
     }
 }
 

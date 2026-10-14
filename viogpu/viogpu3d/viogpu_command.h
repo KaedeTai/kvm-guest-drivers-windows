@@ -63,18 +63,15 @@ class VioGpuCommand final : public HandleBase<"VIOGCOMM"_M, VioGpuCommand>
     // ack.  A stamped command goes back into the stamp table under its
     // cookie (undoing the submit's consume-once): the resubmitted packet
     // carries the same private data, so it recovers this same object --
-    // monitored-fence write, oversized-body capture, busy allocations,
+    // monitored-fence write, oversized-body capture, attached allocations,
     // KMD authorship -- and executes it once, in resubmission order.  An
     // unstamped command holds nothing a fresh one would not rebuild from
     // the private data, so it is freed.  Nothing is executed or reported.
     void Discard();
-    // Free a command that never ran: drop its busy marks and any pinned
-    // monitored-fence mapping without performing the write.
+    // Free a command that never ran: drop any pinned monitored-fence
+    // mapping without performing the write.  Its allocations are not
+    // touched, so it is safe after they are destroyed.
     void FreeUnrun();
-    // Free a command whose allocations may already be destroyed (its
-    // device is gone, or the adapter is stopping): like FreeUnrun, but its
-    // allocations are not touched.
-    void FreeOrphan();
 
     void PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand);
     void PrepareSubmitVirtual(const DXGKARG_SUBMITCOMMANDVIRTUAL *pSubmitCommand);

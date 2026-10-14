@@ -1594,41 +1594,6 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 status = allocation->EscapeReleaseWindow(pRelDevice);
                 break;
             }
-        case VIOGPU_RES_BUSY:
-            {
-                size = sizeof(VIOGPU_RES_BUSY_REQ);
-                if (pVioGpuEscape->DataLength < size)
-                {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
-                    return STATUS_INVALID_BUFFER_SIZE;
-                }
-                VioGpuAllocation *allocation = AllocationFromHandle(pVioGpuEscape->ResourceBusy.ResHandle);
-                if (allocation == NULL)
-                {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s RES_BUSY invalid handle %x\n", __FUNCTION__,
-                                                 pVioGpuEscape->ResourceBusy.ResHandle));
-                    return STATUS_INVALID_PARAMETER;
-                }
-                // See RES_INFO: the KMT-map fallback resolves on the handle
-                // value alone, so the caller's claim to this allocation still
-                // has to be checked.  RES_BUSY can also block on another
-                // allocation's busy event.
-                VioGpuDevice *pBusyDevice = VioGpuDevice::FromHandle(pEscape->hDevice);
-                if (!allocation->IsOpenOn(pBusyDevice))
-                {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s RES_BUSY res_id=%d not open on device %p\n",
-                              __FUNCTION__, allocation->GetId(), pBusyDevice));
-                    return STATUS_ACCESS_DENIED;
-                }
-                status = allocation->EscapeResourceBusy(&pVioGpuEscape->ResourceBusy);
-
-                break;
-            }
         case VIOGPU_CTX_INIT:
             {
                 size = sizeof(VIOGPU_CTX_INIT_REQ);
